@@ -1,0 +1,39 @@
+[package]
+name = "thebrain"
+version = "0.1.0"
+description = "TheBrain v0.1 desktop knowledge vault skeleton"
+authors = ["TheBrain contributors"]
+license = "UNLICENSED"
+repository = ""
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+name = "thebrain_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "thebrain"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.42", features = ["serde"] }
+base64 = "0.22.1"
+notify = "8.2.0"
+regex = "1.12.2"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = "0.9.34"
+tauri = { version = "2.11.2", features = [] }
+tauri-plugin-dialog = "2.7.1"
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-single-instance = "2.4.2"
+thiserror = "2.0.17"
+
+[dev-dependencies]
+tempfile = "3.23.0"

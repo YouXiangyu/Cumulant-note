@@ -1,0 +1,4 @@
+interface:
+  display_name: "MiMo Audio Transcriber"
+  short_description: "Transcribe audio through MiMo v2.5"
+  default_prompt: "Use $mimo-audio-transcriber to transcribe an audio file into a speaker-labeled Markdown transcript."
