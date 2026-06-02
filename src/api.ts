@@ -60,6 +60,108 @@ export interface UsageSummary extends CommandMeta {
   storage: string;
 }
 
+export interface RagIndexRun {
+  id: number;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  scannedCount: number;
+  indexedCount: number;
+  skippedCount: number;
+  deletedCount: number;
+  chunkCount: number;
+  error?: string;
+}
+
+export interface RagIndexStatus extends CommandMeta {
+  schemaVersion: number;
+  documentCount: number;
+  chunkCount: number;
+  lastRun?: RagIndexRun;
+}
+
+export interface RagCitation {
+  id: string;
+  relativePath: string;
+  title: string;
+  headingPath: string[];
+  snippet: string;
+  score: number;
+  channel: string;
+  startLine: number;
+  endLine: number;
+}
+
+export interface RagTraceNode {
+  id: number;
+  runId: number;
+  parentId?: number;
+  nodeType: string;
+  name: string;
+  input: unknown;
+  output: unknown;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface RagTraceRun {
+  id: number;
+  queryId?: number;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  metadata: unknown;
+  nodes: RagTraceNode[];
+}
+
+export interface RagAnswer extends CommandMeta {
+  queryId: number;
+  provider: string;
+  model: string;
+  status: string;
+  isMock: boolean;
+  answer: string;
+  fallbackReason?: string;
+  retrievedCount: number;
+  citations: RagCitation[];
+  trace: RagTraceRun;
+}
+
+export interface MimoStatus extends CommandMeta {
+  provider: string;
+  extractModel: string;
+  organizeModel: string;
+  hasKey: boolean;
+  keySource?: string;
+  status: "ready" | "missing_key" | string;
+}
+
+export interface InboxImportResult extends CommandMeta {
+  sourcePath: string;
+  relativePath?: string;
+  fileName?: string;
+  mode: "copy" | "move" | string;
+  status: "imported" | "already_inbox" | "conflict" | "unsupported" | "failed" | string;
+  bytes?: number;
+  auditId?: number;
+  queueItemId?: number;
+  error?: string;
+}
+
+export interface MimoExtractResult extends CommandMeta {
+  provider: string;
+  model: string;
+  status: string;
+  isMock: boolean;
+  relativePath: string;
+  text: string;
+  error?: string;
+}
+
 export interface AppSettings extends CommandMeta {
   language: "zh-CN";
   organizationTemplate: string;
@@ -133,6 +235,29 @@ export interface AiOrganizeResult extends CommandMeta {
   message: string;
 }
 
+export interface InboxPlanResult extends CommandMeta {
+  extraction: MimoExtractResult;
+  plan: OrganizeDecisionResult;
+  candidates: TodoScheduleCandidate[];
+  budget: BudgetStatus;
+}
+
+export interface OrganizeDecisionResult extends CommandMeta {
+  provider: string;
+  model: string;
+  status: string;
+  isMock: boolean;
+  sourceRelativePath: string;
+  targetRelativePath: string;
+  tags: string[];
+  summary: string;
+  reason: string;
+  confidence: number;
+  todoCandidates: unknown[];
+  scheduleCandidates: unknown[];
+  error?: string;
+}
+
 export interface MoveResult extends CommandMeta {
   sourceRelativePath: string;
   targetRelativePath: string;
@@ -192,7 +317,7 @@ export const defaultAppSettings: AppSettings = {
   organizationTemplate: "文档管理 + 知识标签",
   aiDecisionModel: "mimo-v2.5-pro",
   extractionModel: "mimo-v2.5",
-  stickyNotesPath: ".thebrain/sticky-notes",
+  stickyNotesPath: "000-收集箱/便利贴草稿.md",
   autoSaveIntervalSeconds: 20,
   queueConcurrency: 1,
   retryLimit: 3,
@@ -236,6 +361,95 @@ function fallbackUsage(reason: string): UsageSummary {
     totalTokens: 0,
     costCents: 0,
     storage: ".thebrain/index.sqlite 未连接",
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackRagStatus(reason: string): RagIndexStatus {
+  return {
+    schemaVersion: 0,
+    documentCount: 0,
+    chunkCount: 0,
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackRagRun(reason: string): RagIndexRun & CommandMeta {
+  return {
+    id: 0,
+    status: "failed",
+    startedAt: nowIso(),
+    finishedAt: nowIso(),
+    scannedCount: 0,
+    indexedCount: 0,
+    skippedCount: 0,
+    deletedCount: 0,
+    chunkCount: 0,
+    error: reason,
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackRagAnswer(question: string, reason: string): RagAnswer {
+  const trace: RagTraceRun = {
+    id: 0,
+    status: "fallback",
+    startedAt: nowIso(),
+    finishedAt: nowIso(),
+    durationMs: 0,
+    metadata: { question },
+    nodes: [],
+  };
+  return {
+    queryId: 0,
+    provider: "mock",
+    model: "mimo-v2.5-pro",
+    status: "fallback",
+    isMock: true,
+    answer: `RAG 命令不可用：${reason}`,
+    fallbackReason: reason,
+    retrievedCount: 0,
+    citations: [],
+    trace,
+    isFallback: true,
+  };
+}
+
+function fallbackMimoStatus(reason: string): MimoStatus {
+  return {
+    provider: "mimo",
+    extractModel: "mimo-v2.5",
+    organizeModel: "mimo-v2.5-pro",
+    hasKey: false,
+    status: "missing_key",
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackImportResults(sourcePaths: string[], mode: string, reason: string): InboxImportResult[] {
+  return sourcePaths.map((sourcePath) => ({
+    sourcePath,
+    mode,
+    status: "failed",
+    error: reason,
+    isFallback: true,
+    fallbackReason: reason,
+  }));
+}
+
+function fallbackExtract(relativePath: string, reason: string): MimoExtractResult {
+  return {
+    provider: "mock",
+    model: "mimo-v2.5",
+    status: "fallback",
+    isMock: true,
+    relativePath,
+    text: "",
+    error: reason,
     isFallback: true,
     fallbackReason: reason,
   };
@@ -370,6 +584,31 @@ function normalizeBudgetStatus(raw: any): BudgetStatus {
 }
 
 function normalizeOrganizePlan(raw: any): AiOrganizePlan {
+  if (raw?.plan) {
+    const plan = raw.plan as OrganizeDecisionResult;
+    return {
+      id: `${plan.provider ?? "mimo"}-${Date.now()}`,
+      summary:
+        plan.summary ||
+        plan.reason ||
+        `${raw.extraction?.status ?? "unknown"} extraction -> ${plan.status ?? "unknown"} plan`,
+      candidates: [
+        {
+          id: plan.sourceRelativePath,
+          sourceRelativePath: plan.sourceRelativePath,
+          targetRelativePath: plan.targetRelativePath,
+          confidence: plan.confidence ?? 0,
+          reason: plan.reason ?? plan.error ?? "",
+          tags: plan.tags ?? [],
+          isFallback: plan.isMock || raw.extraction?.isMock,
+          fallbackReason: plan.error || raw.extraction?.error,
+        },
+      ],
+      createdAt: nowIso(),
+      isFallback: plan.isMock || raw.extraction?.isMock,
+      fallbackReason: plan.error || raw.extraction?.error,
+    };
+  }
   if (!raw || typeof raw !== "object" || "candidates" in raw) {
     return raw as AiOrganizePlan;
   }
@@ -433,6 +672,39 @@ function normalizeCandidate(raw: any): TodoScheduleCandidate {
   };
 }
 
+function normalizeConflict(raw: any): ConflictItem {
+  if (!raw || typeof raw !== "object" || "options" in raw) {
+    return raw as ConflictItem;
+  }
+  const payload = raw.payload ?? raw;
+  const source =
+    payload.sourceRelativePath ?? payload.sourcePath ?? payload.relativePath ?? "";
+  const target = payload.targetRelativePath ?? payload.relativePath ?? "";
+  return {
+    id: String(raw.id ?? raw.eventId ?? payload.id ?? Date.now()),
+    kind: "target_exists",
+    sourceRelativePath: source,
+    targetRelativePath: target,
+    message: payload.message ?? payload.error ?? "Conflict requires manual handling",
+    options: ["rename", "skip", "keep_existing"],
+    recommendedAction: "rename",
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
+  };
+}
+
+function normalizeConflictResolution(raw: any, conflictId: string, action: ConflictResolutionAction): ConflictResolutionResult {
+  if (!raw || typeof raw !== "object" || "resolved" in raw) {
+    return raw as ConflictResolutionResult;
+  }
+  return {
+    conflictId,
+    action,
+    resolved: raw.status === "resolved",
+    message: raw.status ?? "resolved",
+  };
+}
+
 function normalizeSticky(raw: any): StickyNote {
   if (!raw || typeof raw !== "object" || "content" in raw) {
     return raw as StickyNote;
@@ -461,14 +733,50 @@ export async function selectVault(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
+export async function selectImportFiles(): Promise<string[]> {
+  const selected = await open({ directory: false, multiple: true });
+  if (Array.isArray(selected)) return selected.map(String);
+  return typeof selected === "string" ? [selected] : [];
+}
+
 export const commands = {
   initVault: (vaultPath: string) => invoke<VaultInitResult>("init_vault", { vaultPath }),
   listVaultTree: (vaultPath: string) => invoke<VaultTreeNode[]>("list_vault_tree", { vaultPath }),
   listInbox: (vaultPath: string) => invoke<InboxItem[]>("list_inbox", { vaultPath }),
   parseInboxLedger: (vaultPath: string) =>
     invoke<LedgerItem[]>("parse_inbox_ledger", { vaultPath }),
+  importToInbox: (vaultPath: string, sourcePaths: string[], mode: "copy" | "move" = "copy") =>
+    invokeWithFallback<InboxImportResult[]>(
+      "import_to_inbox",
+      { vaultPath, sourcePaths, mode },
+      (reason) => fallbackImportResults(sourcePaths, mode, reason),
+    ),
   getAiUsage: (vaultPath: string) =>
     invokeWithFallback<UsageSummary>("get_ai_usage", { vaultPath }, fallbackUsage),
+  rebuildRagIndex: (vaultPath: string) =>
+    invokeWithFallback<RagIndexRun & CommandMeta>(
+      "rebuild_rag_index",
+      { vaultPath },
+      fallbackRagRun,
+    ),
+  getRagIndexStatus: (vaultPath: string) =>
+    invokeWithFallback<RagIndexStatus>(
+      "get_rag_index_status",
+      { vaultPath },
+      fallbackRagStatus,
+    ),
+  askRag: (vaultPath: string, question: string, topK = 6, conversationId?: number) =>
+    invokeWithFallback<RagAnswer>(
+      "ask_rag",
+      { vaultPath, question, topK, conversationId },
+      (reason) => fallbackRagAnswer(question, reason),
+    ),
+  getLatestRagTrace: (vaultPath: string) =>
+    invokeWithFallback<RagTraceRun | null>(
+      "get_latest_rag_trace",
+      { vaultPath },
+      () => null,
+    ),
   readMarkdown: (vaultPath: string, relativePath: string) =>
     invoke<MarkdownDocument>("read_markdown", { vaultPath, relativePath }),
   saveMarkdown: (
@@ -521,12 +829,66 @@ export const commands = {
         budgetHardStopCents: settings.hardStopCents,
       }),
     ).then(normalizeBudgetStatus),
-  planAiOrganize: (vaultPath: string) =>
-    invokeWithFallback<any>("plan_ai_organize", { vaultPath, forceMock: true }, fallbackOrganizePlan).then(normalizeOrganizePlan),
-  runAiOrganize: (vaultPath: string, planId?: string) =>
+  getMimoStatus: (vaultPath: string) =>
+    invokeWithFallback<MimoStatus>("get_mimo_status", { vaultPath }, fallbackMimoStatus),
+  extractWithMimo: (vaultPath: string, relativePath: string, forceMock = false) =>
+    invokeWithFallback<MimoExtractResult>(
+      "extract_with_mimo",
+      { vaultPath, input: { relativePath, forceMock } },
+      (reason) => fallbackExtract(relativePath, reason),
+    ),
+  planInboxItem: (vaultPath: string, sourceRelativePath: string, forceMock = false) =>
+    invokeWithFallback<any>(
+      "plan_inbox_item",
+      { vaultPath, sourceRelativePath, forceMock },
+      (reason) => ({
+        extraction: fallbackExtract(sourceRelativePath, reason),
+        plan: {
+          provider: "mock",
+          model: "mimo-v2.5-pro",
+          status: "fallback",
+          isMock: true,
+          sourceRelativePath,
+          targetRelativePath: sourceRelativePath.replace(/^000-[^/]+\//, "100-Organized/"),
+          tags: ["inbox"],
+          summary: "Fallback organization decision.",
+          reason,
+          confidence: 0.35,
+          todoCandidates: [],
+          scheduleCandidates: [],
+          error: reason,
+        },
+        candidates: [],
+        budget: fallbackBudgetStatus(reason),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then((raw) => ({
+      ...raw,
+      candidates: (raw.candidates ?? []).map(normalizeCandidate),
+      budget: normalizeBudgetStatus(raw.budget),
+    }) as InboxPlanResult),
+  planAiOrganize: (
+    vaultPath: string,
+    sourceRelativePath?: string,
+    extractedText?: string,
+    forceMock = false,
+  ) =>
+    invokeWithFallback<any>(
+      "plan_ai_organize",
+      { vaultPath, sourceRelativePath, extractedText, forceMock },
+      fallbackOrganizePlan,
+    ).then(normalizeOrganizePlan),
+  runAiOrganize: (
+    vaultPath: string,
+    planId?: string,
+    sourceRelativePath?: string,
+    targetRelativePath?: string,
+    reason?: string,
+  ) =>
     invokeWithFallback<AiOrganizeResult>(
       "run_ai_organize",
-      { vaultPath, planId },
+      { vaultPath, planId, sourceRelativePath, targetRelativePath, reason },
       (reason) => ({
         moved: 0,
         skipped: 1,
@@ -644,7 +1006,9 @@ export const commands = {
       (reason) => ({ noteId, isFallback: true, fallbackReason: reason }),
     ),
   listConflicts: (vaultPath: string) =>
-    invokeWithFallback<ConflictItem[]>("list_conflicts", { vaultPath }, () => []),
+    invokeWithFallback<any[]>("list_conflicts", { vaultPath }, () => []).then((items) =>
+      items.map(normalizeConflict),
+    ),
   resolveConflict: (
     vaultPath: string,
     conflictId: string,
@@ -661,5 +1025,5 @@ export const commands = {
         isFallback: true,
         fallbackReason: reason,
       }),
-    ),
+    ).then((raw) => normalizeConflictResolution(raw, conflictId, action)),
 };

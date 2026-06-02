@@ -1,24 +1,35 @@
-use crate::services::ai::{MimoExtractInput, MimoExtractResult, MimoProvider, OrganizeDecision};
+use crate::services::ai::{
+    MimoExtractInput, MimoExtractResult, MimoProvider, MimoStatus, OrganizeDecision,
+};
+use crate::services::audit::AuditService;
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
+use crate::services::importer::{ImportService, InboxImportResult};
 use crate::services::inbox::{InboxItem, InboxService};
 use crate::services::ledger::{LedgerItem, LedgerService};
 use crate::services::markdown::{MarkdownDocument, MarkdownExport, MarkdownService};
 use crate::services::movement::{MoveLog, MoveRequest, MovementService};
-use crate::services::queue::{ListenerState, ListenerStateUpdate, QueueItem, QueueItemInput, QueueService};
+use crate::services::queue::{
+    ListenerState, ListenerStateUpdate, QueueItem, QueueItemInput, QueueService,
+};
+use crate::services::rag::{RagAnswer, RagIndexRun, RagIndexStatus, RagService};
+use crate::services::rag_trace::RagTraceRun;
 use crate::services::settings::{AppSettings, AppSettingsInput, SettingsService};
 use crate::services::sticky::{StickyNote, StickyNoteInput, StickyService};
 use crate::services::usage::{UsageService, UsageSummary};
-use crate::services::vault::{canonical_vault_root, normalize_relative_path, VaultInitResult, VaultService, VaultTreeNode, INBOX_DIR, LEDGER_FILE};
+use crate::services::vault::{
+    canonical_vault_root, normalize_relative_path, VaultInitResult, VaultService, VaultTreeNode,
+    INBOX_DIR, LEDGER_FILE,
+};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[derive(Default)]
 pub struct WatcherRegistry {
@@ -32,6 +43,15 @@ pub struct QueueStatus {
     pub pending: Vec<QueueItem>,
     pub running: Vec<QueueItem>,
     pub failed: Vec<QueueItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxPlanResult {
+    pub extraction: MimoExtractResult,
+    pub plan: OrganizeDecision,
+    pub candidates: Vec<ActionCandidate>,
+    pub budget: BudgetStatus,
 }
 
 fn into_command_result<T>(result: crate::services::ServiceResult<T>) -> Result<T, String> {
@@ -96,8 +116,51 @@ pub fn parse_inbox_ledger(vault_path: String) -> Result<Vec<LedgerItem>, String>
 }
 
 #[tauri::command]
+pub fn import_to_inbox(
+    vault_path: String,
+    source_paths: Vec<String>,
+    mode: Option<String>,
+) -> Result<Vec<InboxImportResult>, String> {
+    into_command_result(ImportService::import_to_inbox(
+        &vault_path,
+        source_paths,
+        mode,
+    ))
+}
+
+#[tauri::command]
 pub fn get_ai_usage(vault_path: String) -> Result<UsageSummary, String> {
     into_command_result(UsageService::summary(&vault_path))
+}
+
+#[tauri::command]
+pub fn rebuild_rag_index(vault_path: String) -> Result<RagIndexRun, String> {
+    into_command_result(RagService::rebuild_index(&vault_path))
+}
+
+#[tauri::command]
+pub fn get_rag_index_status(vault_path: String) -> Result<RagIndexStatus, String> {
+    into_command_result(RagService::status(&vault_path))
+}
+
+#[tauri::command]
+pub fn ask_rag(
+    vault_path: String,
+    question: String,
+    top_k: Option<usize>,
+    conversation_id: Option<i64>,
+) -> Result<RagAnswer, String> {
+    into_command_result(RagService::ask(
+        &vault_path,
+        &question,
+        top_k,
+        conversation_id,
+    ))
+}
+
+#[tauri::command]
+pub fn get_latest_rag_trace(vault_path: String) -> Result<Option<RagTraceRun>, String> {
+    into_command_result(RagService::latest_trace(&vault_path))
 }
 
 #[tauri::command]
@@ -106,7 +169,10 @@ pub fn get_app_settings(vault_path: String) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-pub fn save_app_settings(vault_path: String, settings: AppSettingsInput) -> Result<AppSettings, String> {
+pub fn save_app_settings(
+    vault_path: String,
+    settings: AppSettingsInput,
+) -> Result<AppSettings, String> {
     into_command_result(SettingsService::save(&vault_path, settings))
 }
 
@@ -122,28 +188,34 @@ pub fn scan_inbox_queue(vault_path: String) -> Result<QueueStatus, String> {
 
 #[tauri::command]
 pub fn pause_queue(vault_path: String) -> Result<QueueStatus, String> {
-    into_command_result(QueueService::set_listener_state(
-        &vault_path,
-        ListenerStateUpdate {
-            enabled: false,
-            status: "paused".to_string(),
-            last_event_at: None,
-            last_error: None,
-        },
-    ).and_then(|_| queue_status(&vault_path)))
+    into_command_result(
+        QueueService::set_listener_state(
+            &vault_path,
+            ListenerStateUpdate {
+                enabled: false,
+                status: "paused".to_string(),
+                last_event_at: None,
+                last_error: None,
+            },
+        )
+        .and_then(|_| queue_status(&vault_path)),
+    )
 }
 
 #[tauri::command]
 pub fn resume_queue(vault_path: String) -> Result<QueueStatus, String> {
-    into_command_result(QueueService::set_listener_state(
-        &vault_path,
-        ListenerStateUpdate {
-            enabled: true,
-            status: "watching".to_string(),
-            last_event_at: None,
-            last_error: None,
-        },
-    ).and_then(|_| queue_status(&vault_path)))
+    into_command_result(
+        QueueService::set_listener_state(
+            &vault_path,
+            ListenerStateUpdate {
+                enabled: true,
+                status: "watching".to_string(),
+                last_event_at: None,
+                last_error: None,
+            },
+        )
+        .and_then(|_| queue_status(&vault_path)),
+    )
 }
 
 #[tauri::command]
@@ -172,15 +244,18 @@ pub fn start_inbox_watcher(
         .lock()
         .map_err(|_| "watcher registry poisoned".to_string())?
         .insert(watch_key, watcher);
-    into_command_result(QueueService::set_listener_state(
-        &vault_path,
-        ListenerStateUpdate {
-            enabled: true,
-            status: "watching".to_string(),
-            last_event_at: Some(chrono::Utc::now().to_rfc3339()),
-            last_error: None,
-        },
-    ).and_then(|_| queue_status(&vault_path)))
+    into_command_result(
+        QueueService::set_listener_state(
+            &vault_path,
+            ListenerStateUpdate {
+                enabled: true,
+                status: "watching".to_string(),
+                last_event_at: Some(chrono::Utc::now().to_rfc3339()),
+                last_error: None,
+            },
+        )
+        .and_then(|_| queue_status(&vault_path)),
+    )
 }
 
 #[tauri::command]
@@ -194,15 +269,18 @@ pub fn stop_inbox_watcher(
         .lock()
         .map_err(|_| "watcher registry poisoned".to_string())?
         .remove(&root.to_string_lossy().to_string());
-    into_command_result(QueueService::set_listener_state(
-        &vault_path,
-        ListenerStateUpdate {
-            enabled: false,
-            status: "stopped".to_string(),
-            last_event_at: Some(chrono::Utc::now().to_rfc3339()),
-            last_error: None,
-        },
-    ).and_then(|_| queue_status(&vault_path)))
+    into_command_result(
+        QueueService::set_listener_state(
+            &vault_path,
+            ListenerStateUpdate {
+                enabled: false,
+                status: "stopped".to_string(),
+                last_event_at: Some(chrono::Utc::now().to_rfc3339()),
+                last_error: None,
+            },
+        )
+        .and_then(|_| queue_status(&vault_path)),
+    )
 }
 
 #[tauri::command]
@@ -222,20 +300,69 @@ pub fn save_budget_settings(vault_path: String, settings: Value) -> Result<Budge
             .get("hardStopCents")
             .or_else(|| settings.get("dailyLimitCents"))
             .and_then(Value::as_i64),
-        paused: settings.get("paused").and_then(Value::as_bool).unwrap_or(false),
-        retry_limit: settings.get("retryLimit").and_then(Value::as_i64).unwrap_or(3),
+        paused: settings
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        retry_limit: settings
+            .get("retryLimit")
+            .and_then(Value::as_i64)
+            .unwrap_or(3),
         cooldown_seconds: settings
             .get("cooldownSeconds")
             .or_else(|| settings.get("cooldown_seconds"))
             .and_then(Value::as_i64)
             .unwrap_or(0),
     };
-    into_command_result(BudgetService::save_settings(&vault_path, input).and_then(|_| BudgetService::status(&vault_path)))
+    into_command_result(
+        BudgetService::save_settings(&vault_path, input)
+            .and_then(|_| BudgetService::status(&vault_path)),
+    )
 }
 
 #[tauri::command]
-pub fn extract_with_mimo(vault_path: String, input: MimoExtractInput) -> Result<MimoExtractResult, String> {
+pub fn get_mimo_status(vault_path: String) -> Result<MimoStatus, String> {
+    into_command_result(MimoProvider::status(&vault_path))
+}
+
+#[tauri::command]
+pub fn extract_with_mimo(
+    vault_path: String,
+    input: MimoExtractInput,
+) -> Result<MimoExtractResult, String> {
     into_command_result(MimoProvider::extract_file(&vault_path, input))
+}
+
+#[tauri::command]
+pub fn plan_inbox_item(
+    vault_path: String,
+    source_relative_path: String,
+    force_mock: Option<bool>,
+) -> Result<InboxPlanResult, String> {
+    let extraction = MimoProvider::extract_file(
+        &vault_path,
+        MimoExtractInput {
+            relative_path: source_relative_path.clone(),
+            force_mock: force_mock.unwrap_or(false),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let plan = MimoProvider::organize_decision(
+        &vault_path,
+        &source_relative_path,
+        Some(&extraction.text),
+        force_mock.unwrap_or(false),
+    )
+    .map_err(|error| error.to_string())?;
+    let candidates =
+        create_candidates_from_decision(&vault_path, &plan).map_err(|error| error.to_string())?;
+    let budget = BudgetService::status(&vault_path).map_err(|error| error.to_string())?;
+    Ok(InboxPlanResult {
+        extraction,
+        plan,
+        candidates,
+        budget,
+    })
 }
 
 #[tauri::command]
@@ -247,7 +374,9 @@ pub fn plan_ai_organize(
 ) -> Result<OrganizeDecision, String> {
     into_command_result(MimoProvider::organize_decision(
         &vault_path,
-        source_relative_path.as_deref().unwrap_or("000-收集箱/示例笔记.md"),
+        source_relative_path
+            .as_deref()
+            .unwrap_or("000-收集箱/示例笔记.md"),
         extracted_text.as_deref(),
         force_mock.unwrap_or(false),
     ))
@@ -276,6 +405,7 @@ pub fn run_ai_organize(
             "skipped": 0,
             "conflicts": 0,
             "auditId": log.id.to_string(),
+            "movement": &log,
             "message": "AI 整理移动已执行"
         }))
     } else {
@@ -284,7 +414,7 @@ pub fn run_ai_organize(
             "skipped": 0,
             "conflicts": 0,
             "auditId": plan_id.unwrap_or_else(|| "plan-only".to_string()),
-            "message": "整理计划已记录；请选择具体候选后执行移动"
+            "message": "Plan recorded; select a concrete target before moving"
         }))
     }
 }
@@ -307,7 +437,11 @@ pub fn move_inbox_item(
 }
 
 #[tauri::command]
-pub fn rollback_move(vault_path: String, movement_id: Option<i64>, audit_id: Option<String>) -> Result<MoveLog, String> {
+pub fn rollback_move(
+    vault_path: String,
+    movement_id: Option<i64>,
+    audit_id: Option<String>,
+) -> Result<MoveLog, String> {
     let movement_id = movement_id
         .or_else(|| audit_id.and_then(|id| id.parse::<i64>().ok()))
         .ok_or_else(|| "movement_id or audit_id is required".to_string())?;
@@ -325,23 +459,38 @@ pub fn list_todo_schedule_candidates(vault_path: String) -> Result<Vec<ActionCan
 }
 
 #[tauri::command]
-pub fn create_todo_schedule_candidate(vault_path: String, candidate: CandidateInput) -> Result<ActionCandidate, String> {
+pub fn create_todo_schedule_candidate(
+    vault_path: String,
+    candidate: CandidateInput,
+) -> Result<ActionCandidate, String> {
     into_command_result(CandidateService::create(&vault_path, candidate))
 }
 
 #[tauri::command]
-pub fn confirm_todo_schedule_candidate(vault_path: String, candidate_id: i64) -> Result<ActionCandidate, String> {
+pub fn confirm_todo_schedule_candidate(
+    vault_path: String,
+    candidate_id: i64,
+) -> Result<ActionCandidate, String> {
     into_command_result(CandidateService::confirm(&vault_path, candidate_id))
 }
 
 #[tauri::command]
-pub fn dismiss_todo_schedule_candidate(vault_path: String, candidate_id: i64) -> Result<ActionCandidate, String> {
+pub fn dismiss_todo_schedule_candidate(
+    vault_path: String,
+    candidate_id: i64,
+) -> Result<ActionCandidate, String> {
     into_command_result(CandidateService::reject(&vault_path, candidate_id))
 }
 
 #[tauri::command]
-pub fn list_sticky_notes(vault_path: String, include_archived: Option<bool>) -> Result<Vec<StickyNote>, String> {
-    into_command_result(StickyService::list(&vault_path, include_archived.unwrap_or(false)))
+pub fn list_sticky_notes(
+    vault_path: String,
+    include_archived: Option<bool>,
+) -> Result<Vec<StickyNote>, String> {
+    into_command_result(StickyService::list(
+        &vault_path,
+        include_archived.unwrap_or(false),
+    ))
 }
 
 #[tauri::command]
@@ -392,7 +541,8 @@ pub fn register_global_shortcut(app: AppHandle, shortcut: String) -> Result<Stri
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
-                    let _ = window.emit("thebrain-sticky-shortcut", json!({"shortcut": registered}));
+                    let _ =
+                        window.emit("thebrain-sticky-shortcut", json!({"shortcut": registered}));
                 }
             }
         })
@@ -401,13 +551,129 @@ pub fn register_global_shortcut(app: AppHandle, shortcut: String) -> Result<Stri
 }
 
 #[tauri::command]
-pub fn list_conflicts() -> Vec<Value> {
-    Vec::new()
+pub fn list_conflicts(vault_path: String) -> Result<Vec<Value>, String> {
+    let conflicts =
+        AuditService::list_by_type(&vault_path, "conflict").map_err(|error| error.to_string())?;
+    let resolved = AuditService::list_by_type(&vault_path, "conflict_resolved")
+        .map_err(|error| error.to_string())?;
+    let resolved_ids: HashSet<i64> = resolved
+        .iter()
+        .filter_map(|event| {
+            event
+                .payload
+                .get("conflictId")
+                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+        })
+        .collect();
+    Ok(conflicts
+        .into_iter()
+        .filter(|event| !resolved_ids.contains(&event.id))
+        .map(|event| {
+            json!({
+                "id": event.id.to_string(),
+                "eventId": event.id,
+                "eventType": event.event_type,
+                "createdAt": event.created_at,
+                "status": event.payload.get("status").and_then(Value::as_str).unwrap_or("open"),
+                "payload": event.payload
+            })
+        })
+        .collect())
 }
 
 #[tauri::command]
-pub fn resolve_conflict(_conflict_id: String, _strategy: String) -> Value {
-    json!({"status": "noop"})
+pub fn resolve_conflict(
+    vault_path: String,
+    conflict_id: String,
+    action: String,
+) -> Result<Value, String> {
+    let parsed_id = conflict_id
+        .parse::<i64>()
+        .map_err(|_| "conflict_id must be an audit event id".to_string())?;
+    let event = AuditService::record(
+        &vault_path,
+        "conflict_resolved",
+        json!({
+            "conflictId": parsed_id,
+            "action": action,
+            "status": "resolved"
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "status": "resolved",
+        "conflictId": parsed_id,
+        "auditId": event.id
+    }))
+}
+
+fn create_candidates_from_decision(
+    vault_path: &str,
+    decision: &OrganizeDecision,
+) -> crate::services::ServiceResult<Vec<ActionCandidate>> {
+    let mut created = Vec::new();
+    for item in &decision.todo_candidates {
+        created.push(CandidateService::create(
+            vault_path,
+            CandidateInput {
+                candidate_type: "todo".to_string(),
+                source_relative_path: Some(decision.source_relative_path.clone()),
+                title: candidate_title(item, "Untitled todo"),
+                payload: Some(candidate_payload(item, decision)),
+            },
+        )?);
+    }
+    for item in &decision.schedule_candidates {
+        created.push(CandidateService::create(
+            vault_path,
+            CandidateInput {
+                candidate_type: "schedule".to_string(),
+                source_relative_path: Some(decision.source_relative_path.clone()),
+                title: candidate_title(item, "Untitled schedule item"),
+                payload: Some(candidate_payload(item, decision)),
+            },
+        )?);
+    }
+    Ok(created)
+}
+
+fn candidate_title(item: &Value, fallback: &str) -> String {
+    item.get("title")
+        .or_else(|| item.get("text"))
+        .or_else(|| item.get("summary"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn candidate_payload(item: &Value, decision: &OrganizeDecision) -> Value {
+    let mut payload = match item {
+        Value::Object(object) => object.clone(),
+        other => {
+            let mut object = Map::new();
+            object.insert("value".to_string(), other.clone());
+            object
+        }
+    };
+    payload.insert(
+        "sourceRelativePath".to_string(),
+        Value::String(decision.source_relative_path.clone()),
+    );
+    payload.insert(
+        "targetRelativePath".to_string(),
+        Value::String(decision.target_relative_path.clone()),
+    );
+    payload.insert(
+        "planStatus".to_string(),
+        Value::String(decision.status.clone()),
+    );
+    payload.insert(
+        "planProvider".to_string(),
+        Value::String(decision.provider.clone()),
+    );
+    Value::Object(payload)
 }
 
 fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus> {
@@ -432,17 +698,25 @@ fn scan_inbox(vault_path: &str) -> crate::services::ServiceResult<()> {
     Ok(())
 }
 
-fn enqueue_path_event(vault_path: &str, root: &std::path::Path, path: PathBuf) -> crate::services::ServiceResult<()> {
+fn enqueue_path_event(
+    vault_path: &str,
+    root: &std::path::Path,
+    path: PathBuf,
+) -> crate::services::ServiceResult<()> {
     if !path.is_file() {
         return Ok(());
     }
     let relative = path
         .strip_prefix(root)
-        .map_err(|_| crate::services::ServiceError::EscapedVault(path.to_string_lossy().to_string()))?
+        .map_err(|_| {
+            crate::services::ServiceError::EscapedVault(path.to_string_lossy().to_string())
+        })?
         .to_string_lossy()
         .replace('\\', "/");
     let relative = normalize_relative_path(&relative)?;
-    if !relative.starts_with(&format!("{INBOX_DIR}/")) || relative == format!("{INBOX_DIR}/{LEDGER_FILE}") {
+    if !relative.starts_with(&format!("{INBOX_DIR}/"))
+        || relative == format!("{INBOX_DIR}/{LEDGER_FILE}")
+    {
         return Ok(());
     }
     let dedupe_key = format!("file:{relative}");

@@ -1,5 +1,6 @@
 use crate::services::index::open_index_for_vault;
 use crate::services::ServiceResult;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -31,9 +32,18 @@ impl UsageService {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
 
+        let latest_provider = connection
+            .query_row(
+                "SELECT provider FROM ai_usage ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "mock".to_string());
+
         Ok(UsageSummary {
-            is_mock: true,
-            provider: "mock".to_string(),
+            is_mock: total_tokens == 0 && cost_cents == 0 && latest_provider == "mock",
+            provider: latest_provider,
             prompt_tokens,
             completion_tokens,
             total_tokens,

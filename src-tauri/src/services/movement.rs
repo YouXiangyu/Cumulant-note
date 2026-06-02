@@ -1,3 +1,4 @@
+use crate::services::audit::AuditService;
 use crate::services::index::open_index_for_vault;
 use crate::services::vault::{
     canonical_vault_root, normalize_relative_path, resolve_existing_file, INBOX_DIR, LEDGER_FILE,
@@ -6,6 +7,7 @@ use crate::services::{ServiceError, ServiceResult};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 
@@ -44,6 +46,13 @@ impl MovementService {
         let source_path = resolve_existing_file(vault_path, &source)?;
         let target_path = resolve_new_vault_file(&root, &target)?;
         if target_path.exists() {
+            record_movement_conflict(
+                vault_path,
+                "move",
+                &source,
+                &target,
+                "target already exists",
+            );
             return Err(ServiceError::Conflict(format!(
                 "target already exists: {target}"
             )));
@@ -72,6 +81,17 @@ impl MovementService {
                     None,
                     None,
                 )?;
+                AuditService::record(
+                    vault_path,
+                    "move",
+                    json!({
+                        "movementId": log.id,
+                        "sourceRelativePath": &log.source_relative_path,
+                        "targetRelativePath": &log.target_relative_path,
+                        "status": &log.status,
+                        "reason": &log.reason
+                    }),
+                )?;
                 Ok(log)
             }
             Err(error) => {
@@ -93,6 +113,13 @@ impl MovementService {
         let source_path = resolve_existing_file(vault_path, &log.target_relative_path)?;
         let target_path = resolve_new_vault_file(&root, &log.source_relative_path)?;
         if target_path.exists() {
+            record_movement_conflict(
+                vault_path,
+                "rollback",
+                &log.target_relative_path,
+                &log.source_relative_path,
+                "rollback target already exists",
+            );
             return Err(ServiceError::Conflict(format!(
                 "rollback target already exists: {}",
                 log.source_relative_path
@@ -103,14 +130,25 @@ impl MovementService {
         }
         fs::rename(source_path, target_path)?;
         append_rollback_entry(&root, &log.target_relative_path, &log.source_relative_path)?;
-        Self::update_log(
+        let rolled_back = Self::update_log(
             vault_path,
             movement_id,
             "rolled_back",
             log.moved_at,
             Some(Utc::now().to_rfc3339()),
             None,
-        )
+        )?;
+        AuditService::record(
+            vault_path,
+            "rollback",
+            json!({
+                "movementId": rolled_back.id,
+                "sourceRelativePath": &rolled_back.source_relative_path,
+                "targetRelativePath": &rolled_back.target_relative_path,
+                "status": &rolled_back.status
+            }),
+        )?;
+        Ok(rolled_back)
     }
 
     pub fn list(vault_path: &str) -> ServiceResult<Vec<MoveLog>> {
@@ -219,6 +257,26 @@ pub fn ensure_movable_inbox_source(relative_path: &str) -> ServiceResult<()> {
             "AI movement source must be inside 000-收集箱".to_string(),
         ))
     }
+}
+
+fn record_movement_conflict(
+    vault_path: &str,
+    operation: &str,
+    source: &str,
+    target: &str,
+    message: &str,
+) {
+    let _ = AuditService::record(
+        vault_path,
+        "conflict",
+        json!({
+            "kind": operation,
+            "sourceRelativePath": source,
+            "targetRelativePath": target,
+            "status": "open",
+            "message": message
+        }),
+    );
 }
 
 fn append_ledger_entry(

@@ -112,6 +112,7 @@ impl BudgetService {
         validate_nonnegative("cost_cents", input.cost_cents)?;
         let scope = normalize_scope(input.scope)?;
         let connection = open_index_for_vault(vault_path)?;
+        let created_at = Utc::now().to_rfc3339();
         connection.execute(
             "INSERT INTO budget_ledger
                 (scope, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_cents, reason, created_at)
@@ -125,7 +126,21 @@ impl BudgetService {
                 input.total_tokens,
                 input.cost_cents,
                 input.reason,
-                Utc::now().to_rfc3339()
+                created_at
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO ai_usage
+                (provider, model, prompt_tokens, completion_tokens, total_tokens, cost_cents, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                input.provider,
+                input.model,
+                input.prompt_tokens,
+                input.completion_tokens,
+                input.total_tokens,
+                input.cost_cents,
+                created_at
             ],
         )?;
         Self::status(vault_path)

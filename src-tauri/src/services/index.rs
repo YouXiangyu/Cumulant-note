@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-             VALUES ('schema_version', '2', ?1)
+            VALUES ('schema_version', '3', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -179,6 +179,122 @@ impl IndexService {
             );
             CREATE INDEX IF NOT EXISTS idx_sticky_notes_archived_updated
                 ON sticky_notes(archived, updated_at);
+
+            CREATE TABLE IF NOT EXISTS rag_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                modified_at INTEGER NOT NULL DEFAULT 0,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                indexed_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_documents_status
+                ON rag_documents(status);
+
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                relative_path TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                heading_path TEXT NOT NULL DEFAULT '[]',
+                content TEXT NOT NULL,
+                snippet TEXT NOT NULL,
+                start_line INTEGER NOT NULL DEFAULT 1,
+                end_line INTEGER NOT NULL DEFAULT 1,
+                char_start INTEGER NOT NULL DEFAULT 0,
+                char_end INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                token_estimate INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES rag_documents(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_chunks_document_index
+                ON rag_chunks(document_id, chunk_index);
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_relative_status
+                ON rag_chunks(relative_path, status);
+
+            CREATE TABLE IF NOT EXISTS rag_index_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                scanned_count INTEGER NOT NULL DEFAULT 0,
+                indexed_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                deleted_count INTEGER NOT NULL DEFAULT 0,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question TEXT NOT NULL,
+                rewritten_question TEXT,
+                answer TEXT,
+                status TEXT NOT NULL,
+                fallback_reason TEXT,
+                top_k INTEGER NOT NULL DEFAULT 6,
+                created_at TEXT NOT NULL,
+                trace_run_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_queries_created
+                ON rag_queries(created_at);
+
+            CREATE TABLE IF NOT EXISTS rag_trace_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id INTEGER,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_ms INTEGER,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_trace_runs_started
+                ON rag_trace_runs(started_at);
+
+            CREATE TABLE IF NOT EXISTS rag_trace_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                node_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                input_json TEXT NOT NULL DEFAULT '{}',
+                output_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_ms INTEGER,
+                error TEXT,
+                FOREIGN KEY(run_id) REFERENCES rag_trace_runs(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_trace_nodes_run_id
+                ON rag_trace_nodes(run_id, id);
+
+            CREATE TABLE IF NOT EXISTS rag_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                query_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES rag_conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_messages_conversation
+                ON rag_messages(conversation_id, created_at);
             ",
         )?;
         Ok(())
@@ -221,12 +337,20 @@ mod tests {
                     'budget_ledger',
                     'movement_log',
                     'action_candidates',
-                    'sticky_notes'
+                    'sticky_notes',
+                    'rag_documents',
+                    'rag_chunks',
+                    'rag_index_runs',
+                    'rag_queries',
+                    'rag_trace_runs',
+                    'rag_trace_nodes',
+                    'rag_conversations',
+                    'rag_messages'
                 )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 12);
+        assert_eq!(table_count, 20);
     }
 }

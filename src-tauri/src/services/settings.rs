@@ -72,21 +72,51 @@ impl SettingsService {
         let current = Self::get(vault_path).unwrap_or_else(|_| default_settings());
         let settings = AppSettings {
             language: input.language.unwrap_or(current.language),
-            organization_template: input.organization_template.unwrap_or(current.organization_template),
+            organization_template: input
+                .organization_template
+                .unwrap_or(current.organization_template),
             ai_decision_model: input.ai_decision_model.unwrap_or(current.ai_decision_model),
             extraction_model: input.extraction_model.unwrap_or(current.extraction_model),
             sticky_notes_path: input.sticky_notes_path.unwrap_or(current.sticky_notes_path),
-            auto_save_interval_seconds: input.auto_save_interval_seconds.unwrap_or(current.auto_save_interval_seconds).clamp(1, 3600),
-            queue_concurrency: input.queue_concurrency.unwrap_or(current.queue_concurrency).clamp(1, 1),
-            retry_limit: input.retry_limit.unwrap_or(current.retry_limit).clamp(0, 10),
-            cooldown_minutes: input.cooldown_minutes.unwrap_or(current.cooldown_minutes).clamp(0, 1440),
-            enable_global_shortcut: input.enable_global_shortcut.unwrap_or(current.enable_global_shortcut),
+            auto_save_interval_seconds: input
+                .auto_save_interval_seconds
+                .unwrap_or(current.auto_save_interval_seconds)
+                .clamp(1, 3600),
+            queue_concurrency: input
+                .queue_concurrency
+                .unwrap_or(current.queue_concurrency)
+                .clamp(1, 1),
+            retry_limit: input
+                .retry_limit
+                .unwrap_or(current.retry_limit)
+                .clamp(0, 10),
+            cooldown_minutes: input
+                .cooldown_minutes
+                .unwrap_or(current.cooldown_minutes)
+                .clamp(0, 1440),
+            enable_global_shortcut: input
+                .enable_global_shortcut
+                .unwrap_or(current.enable_global_shortcut),
             global_shortcut: input.global_shortcut.unwrap_or(current.global_shortcut),
-            prewarm_windows: input.prewarm_windows.unwrap_or(current.prewarm_windows).clamp(0, 4),
-            active_window_limit: input.active_window_limit.unwrap_or(current.active_window_limit).clamp(1, 16),
-            budget_monthly_cents: input.budget_monthly_cents.unwrap_or(current.budget_monthly_cents).max(0),
-            budget_hard_stop_cents: input.budget_hard_stop_cents.unwrap_or(current.budget_hard_stop_cents).max(0),
-            conflict_default_action: input.conflict_default_action.unwrap_or(current.conflict_default_action),
+            prewarm_windows: input
+                .prewarm_windows
+                .unwrap_or(current.prewarm_windows)
+                .clamp(0, 4),
+            active_window_limit: input
+                .active_window_limit
+                .unwrap_or(current.active_window_limit)
+                .clamp(1, 16),
+            budget_monthly_cents: input
+                .budget_monthly_cents
+                .unwrap_or(current.budget_monthly_cents)
+                .max(0),
+            budget_hard_stop_cents: input
+                .budget_hard_stop_cents
+                .unwrap_or(current.budget_hard_stop_cents)
+                .max(0),
+            conflict_default_action: input
+                .conflict_default_action
+                .unwrap_or(current.conflict_default_action),
             updated_at: Utc::now().to_rfc3339(),
         };
         let connection = open_index_for_vault(vault_path)?;
