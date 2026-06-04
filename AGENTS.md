@@ -37,6 +37,8 @@ TheBrain 是本地优先的个人外置大脑桌面应用，长期方向是：
 - 真实 API key 不得写入 README、代码、测试、日志、SQLite seed、前端错误信息或提交内容。
 - AI 可以在受控范围内自动移动 `000-收集箱/` 中的文件，但必须限制在 Vault 内，不能覆盖已有文件，必须写入日志并支持回滚。
 - 未完成能力可以在前端展示，但必须清楚区分真实可用、实验、占位和后续目标。
+- 前端占位能力真实接入后，必须删除对应占位数据、占位注释和文档中的占位描述，不能让占位实现长期混入真实能力。
+- 项目默认 Markdown/YAML-first：用户可读事实优先写入 Markdown、YAML、目录结构、wikilink 和可读 ledger；SQLite 主要保存索引、日志、队列、预算、Trace、缓存和内部状态。
 
 ## README 维护规则
 
@@ -81,6 +83,7 @@ Subagent 不应私自扩大任务范围。主 agent 必须汇总 subagent 结果
 - 不允许路径逃逸 Vault。
 - 不把 `.thebrain/` 或 `.secrets/` 作为 RAG 用户内容索引。
 - 不把当前尚未真实实现的后端能力描述成已完成。
+- 不把 MiMo provider 的存在等同于完整后台 worker。自动整理必须同时考虑 queue、worker、budget、audit、conflict、movement log 和 rollback。
 
 ## 当前优先级
 

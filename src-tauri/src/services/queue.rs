@@ -1,7 +1,7 @@
 use crate::services::index::open_index_for_vault;
 use crate::services::vault::normalize_relative_path;
 use crate::services::{ServiceError, ServiceResult};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -156,6 +156,37 @@ impl QueueService {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn claim_next(vault_path: &str) -> ServiceResult<Option<QueueItem>> {
+        let connection = open_index_for_vault(vault_path)?;
+        let now = Utc::now().to_rfc3339();
+        let item = connection
+            .query_row(
+                "SELECT id, kind, relative_path, status, dedupe_key, payload_json, attempts,
+                        max_attempts, locked_at, run_after, created_at, updated_at
+                 FROM queue_items
+                 WHERE status = 'pending'
+                   AND (run_after IS NULL OR run_after <= ?1)
+                 ORDER BY created_at, id
+                 LIMIT 1",
+                params![now],
+                row_to_queue_item,
+            )
+            .optional()?;
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        connection.execute(
+            "UPDATE queue_items
+             SET status = 'running',
+                 attempts = attempts + 1,
+                 locked_at = ?1,
+                 updated_at = ?1
+             WHERE id = ?2 AND status = 'pending'",
+            params![now, item.id],
+        )?;
+        get_queue_item(&connection, item.id).map(Some)
+    }
+
     pub fn mark_status(vault_path: &str, id: i64, status: &str) -> ServiceResult<QueueItem> {
         validate_nonempty("queue status", status)?;
         let connection = open_index_for_vault(vault_path)?;
@@ -171,6 +202,74 @@ impl QueueService {
                 "queue item {id} does not exist"
             )));
         }
+        get_queue_item(&connection, id)
+    }
+
+    pub fn finish(
+        vault_path: &str,
+        id: i64,
+        status: &str,
+        error: Option<&str>,
+    ) -> ServiceResult<QueueItem> {
+        validate_nonempty("queue status", status)?;
+        let connection = open_index_for_vault(vault_path)?;
+        let mut item = get_queue_item(&connection, id)?;
+        let now = Utc::now().to_rfc3339();
+        let mut payload = item.payload;
+        if let Some(error) = error {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("lastError".to_string(), Value::String(error.to_string()));
+            }
+        }
+        connection.execute(
+            "UPDATE queue_items
+             SET status = ?1,
+                 payload_json = ?2,
+                 locked_at = NULL,
+                 run_after = NULL,
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![status, serde_json::to_string(&payload)?, now, id],
+        )?;
+        item = get_queue_item(&connection, id)?;
+        Ok(item)
+    }
+
+    pub fn retry_later(
+        vault_path: &str,
+        id: i64,
+        delay_seconds: i64,
+        error: &str,
+    ) -> ServiceResult<QueueItem> {
+        let connection = open_index_for_vault(vault_path)?;
+        let item = get_queue_item(&connection, id)?;
+        let status = if item.attempts >= item.max_attempts {
+            "failed"
+        } else {
+            "pending"
+        };
+        let now = Utc::now();
+        let run_after = (now + Duration::seconds(delay_seconds.max(0))).to_rfc3339();
+        let mut payload = item.payload;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("lastError".to_string(), Value::String(error.to_string()));
+        }
+        connection.execute(
+            "UPDATE queue_items
+             SET status = ?1,
+                 payload_json = ?2,
+                 locked_at = NULL,
+                 run_after = CASE WHEN ?1 = 'pending' THEN ?3 ELSE NULL END,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                status,
+                serde_json::to_string(&payload)?,
+                run_after,
+                now.to_rfc3339(),
+                id
+            ],
+        )?;
         get_queue_item(&connection, id)
     }
 }
@@ -328,5 +427,42 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ServiceError::InvalidRelativePath(_)));
+    }
+
+    #[test]
+    fn queue_claims_one_item_and_can_retry_later() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+
+        let item = QueueService::enqueue(
+            temp.path().to_str().unwrap(),
+            QueueItemInput {
+                kind: "inbox_file_changed".to_string(),
+                relative_path: "000-收集箱/a.md".to_string(),
+                dedupe_key: None,
+                payload: Some(json!({ "source": "test" })),
+                max_attempts: Some(2),
+                run_after: None,
+            },
+        )
+        .unwrap();
+
+        let claimed = QueueService::claim_next(temp.path().to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, item.id);
+        assert_eq!(claimed.status, "running");
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(
+            QueueService::list_by_status(temp.path().to_str().unwrap(), "pending")
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let retried =
+            QueueService::retry_later(temp.path().to_str().unwrap(), item.id, 30, "wait").unwrap();
+        assert_eq!(retried.status, "pending");
+        assert!(retried.run_after.is_some());
     }
 }

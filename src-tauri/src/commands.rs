@@ -21,6 +21,7 @@ use crate::services::vault::{
     canonical_vault_root, normalize_relative_path, VaultInitResult, VaultService, VaultTreeNode,
     INBOX_DIR, LEDGER_FILE,
 };
+use crate::services::worker::{WorkerRunOptions, WorkerRunResult, WorkerService, WorkerStatus};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -43,6 +44,7 @@ pub struct QueueStatus {
     pub pending: Vec<QueueItem>,
     pub running: Vec<QueueItem>,
     pub failed: Vec<QueueItem>,
+    pub conflicts: Vec<QueueItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,6 +181,36 @@ pub fn save_app_settings(
 #[tauri::command]
 pub fn get_queue_status(vault_path: String) -> Result<QueueStatus, String> {
     into_command_result(queue_status(&vault_path))
+}
+
+#[tauri::command]
+pub fn get_worker_status(vault_path: String) -> Result<WorkerStatus, String> {
+    into_command_result(WorkerService::status(&vault_path))
+}
+
+#[tauri::command]
+pub fn run_inbox_worker(
+    vault_path: String,
+    options: Option<WorkerRunOptions>,
+) -> Result<WorkerRunResult, String> {
+    into_command_result(WorkerService::drain(
+        &vault_path,
+        options.unwrap_or(WorkerRunOptions {
+            max_items: None,
+            stable_wait_ms: None,
+            force_mock: None,
+        }),
+    ))
+}
+
+#[tauri::command]
+pub fn pause_inbox_worker(vault_path: String) -> Result<WorkerStatus, String> {
+    into_command_result(WorkerService::pause(&vault_path))
+}
+
+#[tauri::command]
+pub fn resume_inbox_worker(vault_path: String) -> Result<WorkerStatus, String> {
+    into_command_result(WorkerService::resume(&vault_path))
 }
 
 #[tauri::command]
@@ -682,6 +714,7 @@ fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus>
         pending: QueueService::list_by_status(vault_path, "pending")?,
         running: QueueService::list_by_status(vault_path, "running")?,
         failed: QueueService::list_by_status(vault_path, "failed")?,
+        conflicts: QueueService::list_by_status(vault_path, "conflict")?,
     })
 }
 

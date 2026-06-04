@@ -19,6 +19,7 @@ pub mod settings;
 pub mod sticky;
 pub mod usage;
 pub mod vault;
+pub mod worker;
 
 use thiserror::Error;
 

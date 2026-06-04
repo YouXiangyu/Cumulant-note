@@ -91,6 +91,8 @@ import {
   UsageSummary,
   VaultInitResult,
   VaultTreeNode,
+  WorkerRunResult,
+  WorkerStatus,
 } from "./api";
 
 type ViewId = "dashboard" | "inbox" | "markdown" | "notes" | "personal" | "project" | "settings";
@@ -113,6 +115,7 @@ interface ProjectItem {
 const defaultRelativePath = "000-收集箱/新笔记.md";
 const settingsStorageKey = "thebrain.settings";
 const notesStorageKey = "thebrain.stickyNotes";
+// Frontend concept fallback: used only when the Vault has no project-like directories.
 const fallbackProjects: ProjectItem[] = [
   { id: "ai-exam", name: "人工智能-期末考试", relativePath: "100-学校/人工智能-期末考试", updatedAt: "10 分钟前", count: 12 },
   { id: "deep-learning", name: "深度学习-期末报告", relativePath: "100-学校/深度学习-期末报告", updatedAt: "1 小时前", count: 8 },
@@ -270,6 +273,8 @@ export default function App() {
     readStorage<AppSettings>(settingsStorageKey, defaultAppSettings),
   );
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null);
+  const [workerRunResult, setWorkerRunResult] = useState<WorkerRunResult | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
@@ -356,7 +361,7 @@ export default function App() {
   }, [content, markdownDoc]);
 
   const page = pageTitle(activeView);
-  const queueIsPaused = !queueStatus || queueStatus.state === "paused";
+  const queueIsPaused = !workerStatus?.listener.enabled || workerStatus.listener.status === "paused";
   const budgetRatio =
     budgetStatus && budgetStatus.monthlyLimitCents > 0
       ? Math.min(1, budgetStatus.spentCents / budgetStatus.monthlyLimitCents)
@@ -424,10 +429,11 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextBudget, nextConflicts, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextWorker, nextBudget, nextConflicts, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
+        nextVaultPath ? commands.getWorkerStatus(nextVaultPath) : Promise.resolve(null),
         commands.getBudgetStatus(nextVaultPath),
         commands.listConflicts(nextVaultPath),
         commands.listTodoScheduleCandidates(nextVaultPath),
@@ -440,6 +446,7 @@ export default function App() {
       nextSettings.isFallback ? { ...current, isFallback: true } : { ...current, ...nextSettings },
     );
     setQueueStatus(nextQueue);
+    setWorkerStatus(nextWorker);
     setBudgetStatus(nextBudget);
     setConflicts(nextConflicts);
     setTodoCandidates(nextTodoCandidates);
@@ -594,12 +601,26 @@ export default function App() {
 
   async function toggleQueue() {
     const result = await run(
-      () => (queueIsPaused ? commands.resumeQueue(vaultPath) : commands.pauseQueue(vaultPath)),
-      queueIsPaused ? "恢复队列" : "暂停队列",
-      queueIsPaused ? "队列已恢复" : "队列已暂停",
+      () => (queueIsPaused ? commands.resumeInboxWorker(vaultPath) : commands.pauseInboxWorker(vaultPath)),
+      queueIsPaused ? "恢复后台 worker" : "暂停后台 worker",
+      queueIsPaused ? "后台 worker 已恢复" : "后台 worker 已暂停",
     );
     if (!result) return;
-    setQueueStatus(result);
+    setWorkerStatus(result);
+    const nextQueue = await commands.getQueueStatus(vaultPath);
+    setQueueStatus(nextQueue);
+  }
+
+  async function runInboxWorker() {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.runInboxWorker(vaultPath, 8),
+      "运行后台 worker",
+      "后台 worker 已完成一轮消费",
+    );
+    if (!result) return;
+    setWorkerRunResult(result);
+    await refresh(vaultPath);
   }
 
   async function importFiles(sourcePaths?: string[]) {
@@ -1370,9 +1391,13 @@ export default function App() {
             <Play size={16} aria-hidden="true" />
             运行整理
           </button>
+          <button type="button" className="secondary-button" onClick={runInboxWorker} disabled={!vaultPath || queueIsPaused}>
+            <Zap size={16} aria-hidden="true" />
+            运行后台 worker
+          </button>
           <button type="button" className="secondary-button" onClick={toggleQueue}>
             {queueIsPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-            {queueIsPaused ? "恢复 AI" : "暂停 AI"}
+            {queueIsPaused ? "恢复 worker" : "暂停 worker"}
           </button>
         </div>
 
@@ -1416,6 +1441,18 @@ export default function App() {
                 {extractResult.error ? <span>{extractResult.error}</span> : null}
               </div>
             ) : null}
+            {workerRunResult ? (
+              <div className="operation-summary">
+                <span>
+                  worker {workerRunResult.status}: processed {workerRunResult.processed}, moved {workerRunResult.moved}, failed {workerRunResult.failed}, conflicts {workerRunResult.conflicts}
+                </span>
+                {workerRunResult.items.slice(0, 3).map((item) => (
+                  <span key={item.queueId}>
+                    #{item.queueId} {item.status}: {item.relativePath} {item.message}
+                  </span>
+                ))}
+              </div>
+            ) : null}
 
             <section className="concept-card table-card">
               <div className="card-heading">
@@ -1423,7 +1460,9 @@ export default function App() {
                   <ClipboardCheck size={18} aria-hidden="true" />
                   AI 整理队列
                 </h3>
-                <span>{queueRows.length}</span>
+                <span>
+                  {queueRows.length} · worker {workerStatus?.listener.status ?? "未连接"}
+                </span>
               </div>
               <div className="queue-table">
                 <div className="queue-head">
@@ -1817,6 +1856,8 @@ export default function App() {
   }
 
   function renderPersonalPage() {
+    // Concept page: keep the designed personal workspace UI, but most metrics below are placeholders until
+    // TODO, review, focus-time, relationship, and long-term stats services are implemented.
     return (
       <div className="personal-page">
         <section className="concept-grid three">
@@ -1917,6 +1958,8 @@ export default function App() {
   }
 
   function renderProjectWorkspace() {
+    // Concept page: project aggregation currently mixes real Vault files with placeholder Agent history,
+    // progress, and TODO data. Remove these placeholders when project backend services are connected.
     return (
       <div className="project-page">
         <div className="project-title-row">
@@ -2171,6 +2214,7 @@ export default function App() {
           <span>{vaultPath || "未选择 Vault"}</span>
           <span>{status}</span>
           <span>队列：{queueStateLabel(queueStatus?.state)} · 待处理 {queueStatus?.pending ?? 0}</span>
+          <span>Worker：{workerStatus?.listener.status ?? "未连接"} · 冲突 {workerStatus?.conflicts ?? queueStatus?.conflicts ?? 0}</span>
           <span>预算：{budgetStatus ? formatBudget(budgetStatus.remainingCents) : "未连接"}</span>
           <span>MiMo：{mimoStatus?.hasKey ? "ready" : "missing key"}</span>
           <span>RAG：{ragStatus ? `${ragStatus.documentCount} 文档 / ${ragStatus.chunkCount} chunks` : "未连接"}</span>

@@ -6,18 +6,28 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 
 ## 当前状态
 
-项目当前处于 v0.4 到 v0.5 过渡阶段。Tauri 2 + React + Vite + Rust 桌面骨架已经可运行，当前实现包含：
+项目当前处于 v0.6 第一层能力打磨阶段。Tauri 2 + React + Vite + Rust 桌面骨架已经可运行，当前实现包含：
 
 - 本地 Vault 选择与初始化。
 - `000-收集箱/` 与 `000-收集箱/收集箱-已整理.md`。
 - `.thebrain/index.sqlite` 内部索引、日志和状态数据库。
 - Markdown 读写、预览、导出和 YAML frontmatter 过滤。
 - 收集箱导入、抽取、整理计划、移动、ledger、movement log、audit events 和回滚。
+- 收集箱队列的第一层可信 worker：手动单轮消费 pending 队列、暂停/恢复、稳定等待、预算检查、MiMo 抽取与整理决策、非 mock 且可信时自动移动、失败/冲突写入内部状态。
 - MiMo provider 路径、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用和 Trace。
-- 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页。
+- 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页允许先作为前端概念页保留，部分统计、Agent 历史和学习曲线仍是占位数据。
 
 v0.4 不是完整个人 Agent、真实向量数据库系统或完整多格式解析系统。当前 RAG 使用关键词通道和 local semantic placeholder 通道，不声明已经具备真实 embedding 或重排能力。PDF、DOCX、PPTX、URL 的真实解析仍是后续目标。
+
+当前能力状态约定：
+
+- 真实可用：已有前端入口、Tauri command、本地服务、Vault 或 SQLite 数据支撑。
+- fallback：后端命令失败或运行环境不完整时的安全降级结果，必须显示原因，不代表能力已完成。
+- 占位：按设计图或产品愿景保留的 UI 与样例数据，暂不接正式后端。
+- 后续目标：已进入 PRD/Roadmap，但当前阶段不要求实现。
+
+占位能力真实接入后，应删除对应占位数据、占位注释和 README 中的占位描述。
 
 ## 产品定位
 
@@ -45,11 +55,13 @@ AI 可以在用户指定的 Vault 范围内自动整理并移动 `000-收集箱/
 - embedding、AI prompt/response、token usage、移动历史、队列日志不写入 Markdown frontmatter，只进入 `.thebrain` 内部结构。
 - TODO、日程、联系人档案等行动项可以由 AI 生成候选；是否自动写入正式系统需要在后续 PRD 中按场景定义。
 
-当前代码已经具备移动、日志和回滚基础能力；后台自动队列消费、长期稳定文件监听、批量处理策略和更完整的自动冲突处理仍是后续目标。
+当前代码已经具备移动、日志、回滚和手动触发的单并发队列消费能力；长期稳定文件监听、常驻后台 worker、批量处理策略和更完整的自动冲突处理仍是后续目标。
 
 ## 数据边界
 
 Vault 是用户资产的唯一可信来源；`.thebrain` 是索引、日志、Trace、队列和状态存储，不应污染用户 Markdown。
+
+TheBrain 默认采用 Markdown/YAML-first：用户可读、可迁移、可长期保留的事实优先写入 Markdown、YAML frontmatter、目录结构、wikilink 和可读 ledger；SQLite 只承担索引、embedding、队列、预算、移动日志、审计、Trace、缓存和查询加速等 Markdown 不适合承载的内部状态。
 
 ```text
 Vault/
@@ -93,18 +105,21 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 前端层：
 
 - `src/App.tsx`：桌面工作台 shell，包含 Vault、收集箱、Markdown、AI 整理、RAG 问答、TODO/日程、便利贴、个人页、项目页和设置页。
-- `src/api.ts`：封装 Tauri commands，暴露受控导入、MiMo 状态、抽取、整理计划、移动、回滚、冲突和 RAG 命令。
+- `src/api.ts`：封装 Tauri commands，暴露受控导入、MiMo 状态、抽取、整理计划、worker、移动、回滚、冲突和 RAG 命令。
 - `src/styles.css`：视觉 token、左侧导航、页面网格、收集箱、RAG 面板、Markdown 三栏编辑器和便利贴布局。
 
 本地后端服务层：
 
-- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、MiMo、队列、预算、移动/回滚、候选、便利贴、快捷键、冲突和 RAG commands。
+- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、MiMo、队列、worker、预算、移动/回滚、候选、便利贴、快捷键、冲突和 RAG commands。
 - `src-tauri/src/services/vault.rs`：Vault 初始化和路径规范化。
 - `src-tauri/src/services/importer.rs`：受控复制/移动外部文件到收集箱。
 - `src-tauri/src/services/ai.rs`：MiMo 状态、文本本地抽取、音频/图片 MiMo 抽取、结构化整理 JSON 解析和 fallback。
+- `src-tauri/src/services/worker.rs`：收集箱队列的第一层可信消费器，负责 claim pending item、稳定等待、预算检查、调用 MiMo、可信移动、失败/冲突/audit 记录和手动 drain。
 - `src-tauri/src/services/movement.rs`：收集箱文件移动、ledger、movement log、audit events 和回滚。
 - `src-tauri/src/services/rag.rs`、`retrieval.rs`、`chunking.rs`、`rag_trace.rs`：本地 RAG 索引、检索、分块、引用和 Trace。
 - `src-tauri/src/services/index.rs`：`.thebrain/index.sqlite` schema。
+
+MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker：它只处理 `000-收集箱/` 中的普通文件，不处理 ledger、`.thebrain` 或 `.secrets`；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件。长期常驻 worker、完整去重策略和冲突问答仍是后续目标。
 
 ## 使用方式
 
@@ -126,6 +141,7 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - MiMo 状态命令 `get_mimo_status`，不泄露 key。
 - 抽取命令 `extract_with_mimo`，支持文本本地抽取和音频/图片 MiMo 调用路径。
 - 单文件计划命令 `plan_inbox_item`，返回 extraction、structured plan、候选和预算状态。
+- 第一层 worker 命令 `get_worker_status`、`run_inbox_worker`、`pause_inbox_worker`、`resume_inbox_worker`，支持手动消费队列、暂停恢复、失败/冲突状态展示。
 - 自动/手动移动基础命令，更新 ledger、movement log、audit events。
 - 回滚命令 `rollback_move`，不覆盖已有文件。
 - TODO/日程候选创建、确认、忽略。
@@ -138,7 +154,8 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 
 ## 未完成目标
 
-- 后台自动队列消费、长期文件监听稳定性、批量处理策略和更完整的自动整理策略。
+- 长期常驻 worker、长期文件监听稳定性、批量处理策略和更完整的自动整理策略。
+- 收集箱冲突问答窗口：遇到分类、命名或目标路径冲突时询问用户，并把用户回答保存为可复用整理规则。
 - 真实 MiMo API 的长时间、多文件类型、带成本实机联调。
 - MiMo 返回 token/cost 的真实精确统计。
 - 完整冲突解决 UI，例如自动重命名建议、差异预览和批量处理。
@@ -149,6 +166,7 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - TODO/日程系统从候选到正式行动系统的完整工作流。
 - 便利贴独立多窗口池、窗口回收和更完整的托盘体验。
 - 个人页和项目工作台中的统计、Agent 历史、学习曲线从占位数据升级为真实数据。
+- `src/App.tsx` 页面与状态继续拆分，把个人页、项目页、RAG、收集箱、便利贴等不相关模块拆成更清晰的组件和服务边界。
 - 端到端 GUI 自动化测试和真实 Windows 实机长时间验证。
 
 ## 文档入口
@@ -168,4 +186,4 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、队列、预算、audit、导入、MiMo fallback、移动/回滚、TODO/日程候选、便利贴和 RAG 基础能力。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、队列 claim/retry、预算、audit、导入、MiMo fallback、worker 暂停与失败不移动、移动/回滚、TODO/日程候选、便利贴和 RAG 基础能力。

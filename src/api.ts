@@ -186,12 +186,46 @@ export interface QueueStatus extends CommandMeta {
   pending: number;
   retrying: number;
   failed: number;
+  conflicts?: number;
   completedToday: number;
   concurrency: number;
   retryLimit: number;
   cooldownUntil?: string;
   lastEvent?: string;
   updatedAt: string;
+}
+
+export interface WorkerStatus extends CommandMeta {
+  listener: {
+    enabled: boolean;
+    status: string;
+    lastEventAt?: string;
+    lastError?: string;
+    updatedAt: string;
+  };
+  pending: number;
+  running: number;
+  failed: number;
+  conflicts: number;
+}
+
+export interface WorkerRunItem {
+  queueId: number;
+  relativePath: string;
+  status: string;
+  message: string;
+  movementId?: number;
+}
+
+export interface WorkerRunResult extends CommandMeta {
+  status: string;
+  processed: number;
+  moved: number;
+  skipped: number;
+  failed: number;
+  conflicts: number;
+  items: WorkerRunItem[];
+  listener: WorkerStatus["listener"];
 }
 
 export interface BudgetSettings {
@@ -348,6 +382,8 @@ async function invokeWithFallback<T>(
   try {
     return await invoke<T>(command, args);
   } catch (error) {
+    // Runtime fallback keeps the UI inspectable when a Tauri command is unavailable.
+    // It must stay marked with fallbackReason and must not be treated as a completed backend capability.
     return fallback(toMessage(error));
   }
 }
@@ -462,6 +498,7 @@ function fallbackQueueStatus(reason: string, overrides: Partial<QueueStatus> = {
     pending: 0,
     retrying: 0,
     failed: 0,
+    conflicts: 0,
     completedToday: 0,
     concurrency: defaultAppSettings.queueConcurrency,
     retryLimit: defaultAppSettings.retryLimit,
@@ -470,6 +507,43 @@ function fallbackQueueStatus(reason: string, overrides: Partial<QueueStatus> = {
     isFallback: true,
     fallbackReason: reason,
     ...overrides,
+  };
+}
+
+function fallbackWorkerStatus(reason: string): WorkerStatus {
+  return {
+    listener: {
+      enabled: false,
+      status: "paused",
+      updatedAt: nowIso(),
+      lastError: reason,
+    },
+    pending: 0,
+    running: 0,
+    failed: 0,
+    conflicts: 0,
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackWorkerRun(reason: string): WorkerRunResult {
+  return {
+    status: "failed",
+    processed: 0,
+    moved: 0,
+    skipped: 0,
+    failed: 1,
+    conflicts: 0,
+    items: [],
+    listener: {
+      enabled: false,
+      status: "paused",
+      updatedAt: nowIso(),
+      lastError: reason,
+    },
+    isFallback: true,
+    fallbackReason: reason,
   };
 }
 
@@ -557,6 +631,7 @@ function normalizeQueueStatus(raw: any): QueueStatus {
     pending: raw.pending?.length ?? 0,
     retrying: 0,
     failed: raw.failed?.length ?? 0,
+    conflicts: raw.conflicts?.length ?? 0,
     completedToday: 0,
     concurrency: 1,
     retryLimit: 3,
@@ -811,6 +886,18 @@ export const commands = {
     invokeWithFallback<string[]>("prewarm_sticky_windows", { count }, () => []),
   getQueueStatus: (vaultPath: string) =>
     invokeWithFallback<any>("get_queue_status", { vaultPath }, fallbackQueueStatus).then(normalizeQueueStatus),
+  getWorkerStatus: (vaultPath: string) =>
+    invokeWithFallback<WorkerStatus>("get_worker_status", { vaultPath }, fallbackWorkerStatus),
+  runInboxWorker: (vaultPath: string, maxItems = 8) =>
+    invokeWithFallback<WorkerRunResult>(
+      "run_inbox_worker",
+      { vaultPath, options: { maxItems, stableWaitMs: 1000, forceMock: false } },
+      fallbackWorkerRun,
+    ),
+  pauseInboxWorker: (vaultPath: string) =>
+    invokeWithFallback<WorkerStatus>("pause_inbox_worker", { vaultPath }, fallbackWorkerStatus),
+  resumeInboxWorker: (vaultPath: string) =>
+    invokeWithFallback<WorkerStatus>("resume_inbox_worker", { vaultPath }, fallbackWorkerStatus),
   pauseQueue: (vaultPath: string) =>
     invokeWithFallback<any>("stop_inbox_watcher", { vaultPath }, (reason) =>
       fallbackQueueStatus(reason, { state: "paused", lastEvent: "队列已在前端标记为暂停" }),
