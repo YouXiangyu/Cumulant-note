@@ -33,6 +33,7 @@ pub fn run() {
             commands::get_app_settings,
             commands::save_app_settings,
             commands::get_queue_status,
+            commands::get_inbox_listener_status,
             commands::get_worker_status,
             commands::run_inbox_worker,
             commands::pause_inbox_worker,
@@ -63,6 +64,10 @@ pub fn run() {
             commands::prewarm_sticky_windows,
             commands::register_global_shortcut,
             commands::list_conflicts,
+            commands::get_conflict_detail,
+            commands::submit_conflict_answer,
+            commands::match_conflict_rules,
+            commands::apply_conflict_rule,
             commands::resolve_conflict
         ])
         .run(tauri::generate_context!())

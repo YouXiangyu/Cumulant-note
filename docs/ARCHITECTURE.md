@@ -69,16 +69,18 @@ Vault/.secrets/
 冲突处理：
 
 - 命名冲突、目标路径冲突、分类概念冲突和低置信度整理结果不能静默处理。
-- 第一版应进入可见 conflict 状态，并通过类似 Codex question 的窗口向用户说明冲突原因、候选方案和影响范围。
-- 用户回答应沉淀为本地规则。规则内容优先保存为可读 Markdown 文件，便于用户审查和迁移；`.thebrain/index.sqlite` 保存规则索引、命中记录、审计事件和自动应用状态。
-- 规则文件属于系统辅助文件，不能被收集箱 watcher 当作普通待整理文件反复处理。
+- 当前第一版进入可见 conflict 状态，前端在收集箱侧栏展示冲突来源、目标、原因、用户答案输入和相似规则推荐。
+- 用户回答会沉淀为本地规则。规则正文保存到可读 Markdown：`.thebrain/rules/inbox-organizing-rules.md`；`.thebrain/index.sqlite` 保存 `conflict_rules`、`conflict_rule_hits`、审计事件和应用状态索引。
+- 规则文件属于系统辅助文件，不能被收集箱 watcher 当作普通待整理文件反复处理，也不能被 RAG 当作用户内容索引。
+- 第一版只做推荐和用户确认应用；不静默覆盖、删除或批量自动应用规则。
 
 后台 worker 与 MiMo 的关系：
 
 - MiMo 是 AI provider，负责文本抽取、图片/音频理解、整理建议和问答生成。
+- listener 是收集箱入口层，只监听当前 Vault 的 `000-收集箱/`，负责跳过 ledger、内部目录、隐藏/临时文件和目录项，并在文件稳定后用路径、mtime、size 签名去重入队。
 - 后台 worker 是本地调度器，负责消费队列、稳定等待、调用 MiMo、检查预算、执行移动、写日志、处理重试和回滚。
-- 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态。
-- 只有 MiMo provider 不等于已经有完整后台自动整理；长期可信自动整理仍需要更完整的 resident worker、稳定 watcher、批量策略、冲突问答、规则沉淀和恢复动作。
+- 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态，并尝试附带相似冲突规则推荐。
+- 只有 MiMo provider、listener 或冲突规则服务不等于已经有完整后台自动整理；长期可信自动整理仍需要更完整的 resident worker、长时间实机监听验证、批量策略、规则编辑/禁用和恢复动作。
 
 ## 4. Markdown 与元数据
 
@@ -169,9 +171,11 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 
 - `vault.rs`：Vault 初始化和路径安全。
 - `importer.rs`：导入到收集箱。
+- `listener.rs`：收集箱监听、稳定等待、跳过规则、去重入队和 listener 状态。
 - `ai.rs`：MiMo、抽取、整理决策和 fallback。
 - `worker.rs`：收集箱队列第一层手动消费、暂停恢复、可信移动、失败/冲突审计。
 - `movement.rs`：文件移动、ledger、audit、回滚。
+- `conflict_rules.rs`：冲突详情、用户答案规则 Markdown、规则索引、命中记录、相似规则推荐和确认应用。
 - `rag.rs`：RAG 索引和问答编排。
 - `retrieval.rs`：检索通道和评分。
 - `chunking.rs`：Markdown 分块。

@@ -4,29 +4,30 @@ use crate::services::ai::{
 use crate::services::audit::AuditService;
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
+use crate::services::conflict_rules::{
+    ApplyConflictRuleResult, ConflictAnswerInput, ConflictAnswerResult, ConflictDetail,
+    ConflictRuleMatch, ConflictRuleService,
+};
 use crate::services::importer::{ImportService, InboxImportResult};
 use crate::services::inbox::{InboxItem, InboxService};
 use crate::services::ledger::{LedgerItem, LedgerService};
+use crate::services::listener::{ListenerService, DEFAULT_LISTENER_STABLE_WAIT_MS};
 use crate::services::markdown::{MarkdownDocument, MarkdownExport, MarkdownService};
 use crate::services::movement::{MoveLog, MoveRequest, MovementService};
-use crate::services::queue::{
-    ListenerState, ListenerStateUpdate, QueueItem, QueueItemInput, QueueService,
-};
+use crate::services::queue::{ListenerState, QueueItem, QueueService};
 use crate::services::rag::{RagAnswer, RagIndexRun, RagIndexStatus, RagService};
 use crate::services::rag_trace::RagTraceRun;
 use crate::services::settings::{AppSettings, AppSettingsInput, SettingsService};
 use crate::services::sticky::{StickyNote, StickyNoteInput, StickyService};
 use crate::services::usage::{UsageService, UsageSummary};
 use crate::services::vault::{
-    canonical_vault_root, normalize_relative_path, VaultInitResult, VaultService, VaultTreeNode,
-    INBOX_DIR, LEDGER_FILE,
+    canonical_vault_root, VaultInitResult, VaultService, VaultTreeNode, INBOX_DIR,
 };
 use crate::services::worker::{WorkerRunOptions, WorkerRunResult, WorkerService, WorkerStatus};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
@@ -184,6 +185,11 @@ pub fn get_queue_status(vault_path: String) -> Result<QueueStatus, String> {
 }
 
 #[tauri::command]
+pub fn get_inbox_listener_status(vault_path: String) -> Result<ListenerState, String> {
+    into_command_result(ListenerService::status(&vault_path))
+}
+
+#[tauri::command]
 pub fn get_worker_status(vault_path: String) -> Result<WorkerStatus, String> {
     into_command_result(WorkerService::status(&vault_path))
 }
@@ -215,38 +221,26 @@ pub fn resume_inbox_worker(vault_path: String) -> Result<WorkerStatus, String> {
 
 #[tauri::command]
 pub fn scan_inbox_queue(vault_path: String) -> Result<QueueStatus, String> {
-    into_command_result(scan_inbox(&vault_path).and_then(|_| queue_status(&vault_path)))
+    into_command_result(
+        ListenerService::scan_inbox(&vault_path, DEFAULT_LISTENER_STABLE_WAIT_MS)
+            .and_then(|_| queue_status(&vault_path)),
+    )
 }
 
 #[tauri::command]
 pub fn pause_queue(vault_path: String) -> Result<QueueStatus, String> {
     into_command_result(
-        QueueService::set_listener_state(
-            &vault_path,
-            ListenerStateUpdate {
-                enabled: false,
-                status: "paused".to_string(),
-                last_event_at: None,
-                last_error: None,
-            },
-        )
-        .and_then(|_| queue_status(&vault_path)),
+        ListenerService::mark_stopped(&vault_path).and_then(|_| queue_status(&vault_path)),
     )
 }
 
 #[tauri::command]
 pub fn resume_queue(vault_path: String) -> Result<QueueStatus, String> {
+    let root = canonical_vault_root(&vault_path).map_err(|error| error.to_string())?;
+    let inbox = root.join(INBOX_DIR);
     into_command_result(
-        QueueService::set_listener_state(
-            &vault_path,
-            ListenerStateUpdate {
-                enabled: true,
-                status: "watching".to_string(),
-                last_event_at: None,
-                last_error: None,
-            },
-        )
-        .and_then(|_| queue_status(&vault_path)),
+        ListenerService::mark_running(&vault_path, inbox.to_string_lossy().to_string())
+            .and_then(|_| queue_status(&vault_path)),
     )
 }
 
@@ -263,7 +257,12 @@ pub fn start_inbox_watcher(
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event {
             for path in event.paths {
-                let _ = enqueue_path_event(&vault_for_callback, &root_for_callback, path);
+                let _ = ListenerService::process_path_after_wait(
+                    &vault_for_callback,
+                    &root_for_callback,
+                    path,
+                    DEFAULT_LISTENER_STABLE_WAIT_MS,
+                );
             }
         }
     })
@@ -277,16 +276,8 @@ pub fn start_inbox_watcher(
         .map_err(|_| "watcher registry poisoned".to_string())?
         .insert(watch_key, watcher);
     into_command_result(
-        QueueService::set_listener_state(
-            &vault_path,
-            ListenerStateUpdate {
-                enabled: true,
-                status: "watching".to_string(),
-                last_event_at: Some(chrono::Utc::now().to_rfc3339()),
-                last_error: None,
-            },
-        )
-        .and_then(|_| queue_status(&vault_path)),
+        ListenerService::mark_running(&vault_path, inbox.to_string_lossy().to_string())
+            .and_then(|_| queue_status(&vault_path)),
     )
 }
 
@@ -302,16 +293,7 @@ pub fn stop_inbox_watcher(
         .map_err(|_| "watcher registry poisoned".to_string())?
         .remove(&root.to_string_lossy().to_string());
     into_command_result(
-        QueueService::set_listener_state(
-            &vault_path,
-            ListenerStateUpdate {
-                enabled: false,
-                status: "stopped".to_string(),
-                last_event_at: Some(chrono::Utc::now().to_rfc3339()),
-                last_error: None,
-            },
-        )
-        .and_then(|_| queue_status(&vault_path)),
+        ListenerService::mark_stopped(&vault_path).and_then(|_| queue_status(&vault_path)),
     )
 }
 
@@ -583,34 +565,52 @@ pub fn register_global_shortcut(app: AppHandle, shortcut: String) -> Result<Stri
 }
 
 #[tauri::command]
-pub fn list_conflicts(vault_path: String) -> Result<Vec<Value>, String> {
-    let conflicts =
-        AuditService::list_by_type(&vault_path, "conflict").map_err(|error| error.to_string())?;
-    let resolved = AuditService::list_by_type(&vault_path, "conflict_resolved")
-        .map_err(|error| error.to_string())?;
-    let resolved_ids: HashSet<i64> = resolved
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .get("conflictId")
-                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
-        })
-        .collect();
-    Ok(conflicts
-        .into_iter()
-        .filter(|event| !resolved_ids.contains(&event.id))
-        .map(|event| {
-            json!({
-                "id": event.id.to_string(),
-                "eventId": event.id,
-                "eventType": event.event_type,
-                "createdAt": event.created_at,
-                "status": event.payload.get("status").and_then(Value::as_str).unwrap_or("open"),
-                "payload": event.payload
-            })
-        })
-        .collect())
+pub fn list_conflicts(vault_path: String) -> Result<Vec<ConflictDetail>, String> {
+    into_command_result(ConflictRuleService::list_open_conflicts(&vault_path))
+}
+
+#[tauri::command]
+pub fn get_conflict_detail(
+    vault_path: String,
+    conflict_id: String,
+) -> Result<ConflictDetail, String> {
+    into_command_result(ConflictRuleService::get_conflict(&vault_path, &conflict_id))
+}
+
+#[tauri::command]
+pub fn submit_conflict_answer(
+    vault_path: String,
+    input: ConflictAnswerInput,
+) -> Result<ConflictAnswerResult, String> {
+    into_command_result(ConflictRuleService::submit_answer(&vault_path, input))
+}
+
+#[tauri::command]
+pub fn match_conflict_rules(
+    vault_path: String,
+    source_relative_path: String,
+    target_relative_path: String,
+    message: Option<String>,
+) -> Result<Vec<ConflictRuleMatch>, String> {
+    into_command_result(ConflictRuleService::match_rules(
+        &vault_path,
+        source_relative_path,
+        target_relative_path,
+        message,
+    ))
+}
+
+#[tauri::command]
+pub fn apply_conflict_rule(
+    vault_path: String,
+    conflict_id: String,
+    rule_id: i64,
+) -> Result<ApplyConflictRuleResult, String> {
+    into_command_result(ConflictRuleService::apply_rule(
+        &vault_path,
+        conflict_id,
+        rule_id,
+    ))
 }
 
 #[tauri::command]
@@ -716,53 +716,4 @@ fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus>
         failed: QueueService::list_by_status(vault_path, "failed")?,
         conflicts: QueueService::list_by_status(vault_path, "conflict")?,
     })
-}
-
-fn scan_inbox(vault_path: &str) -> crate::services::ServiceResult<()> {
-    let root = canonical_vault_root(vault_path)?;
-    let inbox = root.join(INBOX_DIR);
-    if !inbox.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(inbox)? {
-        let path = entry?.path();
-        enqueue_path_event(vault_path, &root, path)?;
-    }
-    Ok(())
-}
-
-fn enqueue_path_event(
-    vault_path: &str,
-    root: &std::path::Path,
-    path: PathBuf,
-) -> crate::services::ServiceResult<()> {
-    if !path.is_file() {
-        return Ok(());
-    }
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| {
-            crate::services::ServiceError::EscapedVault(path.to_string_lossy().to_string())
-        })?
-        .to_string_lossy()
-        .replace('\\', "/");
-    let relative = normalize_relative_path(&relative)?;
-    if !relative.starts_with(&format!("{INBOX_DIR}/"))
-        || relative == format!("{INBOX_DIR}/{LEDGER_FILE}")
-    {
-        return Ok(());
-    }
-    let dedupe_key = format!("file:{relative}");
-    let _ = QueueService::enqueue(
-        vault_path,
-        QueueItemInput {
-            kind: "inbox_file_changed".to_string(),
-            relative_path: relative.clone(),
-            dedupe_key: Some(dedupe_key),
-            payload: Some(json!({"source": "watcher", "relativePath": relative})),
-            max_attempts: Some(3),
-            run_after: None,
-        },
-    )?;
-    Ok(())
 }

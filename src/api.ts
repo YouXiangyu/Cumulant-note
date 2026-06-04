@@ -199,6 +199,9 @@ export interface WorkerStatus extends CommandMeta {
   listener: {
     enabled: boolean;
     status: string;
+    watchPath?: string;
+    lastEvent?: string;
+    lastEnqueuedCount?: number;
     lastEventAt?: string;
     lastError?: string;
     updatedAt: string;
@@ -207,6 +210,17 @@ export interface WorkerStatus extends CommandMeta {
   running: number;
   failed: number;
   conflicts: number;
+}
+
+export interface InboxListenerStatus extends CommandMeta {
+  enabled: boolean;
+  status: string;
+  watchPath?: string;
+  lastEvent?: string;
+  lastEnqueuedCount: number;
+  lastEventAt?: string;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export interface WorkerRunItem {
@@ -332,11 +346,65 @@ export type ConflictResolutionAction = "keep_existing" | "overwrite" | "rename" 
 export interface ConflictItem extends CommandMeta {
   id: string;
   kind: "target_exists" | "source_missing" | "locked" | "out_of_vault" | "unknown";
+  eventId?: number;
+  createdAt?: string;
+  status?: string;
   sourceRelativePath: string;
   targetRelativePath: string;
   message: string;
   options: ConflictResolutionAction[];
   recommendedAction: ConflictResolutionAction;
+  recommendations?: ConflictRuleMatch[];
+  payload?: Record<string, unknown>;
+}
+
+export interface ConflictRule {
+  id: number;
+  ruleKey: string;
+  sourcePattern: string;
+  targetPattern: string;
+  answer: string;
+  action: ConflictResolutionAction;
+  autoApply: boolean;
+  matchSummary: string;
+  markdownPath: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  hitCount: number;
+}
+
+export interface ConflictRuleMatch {
+  rule: ConflictRule;
+  score: number;
+  reason: string;
+}
+
+export interface ConflictAnswerInput {
+  conflictId: string;
+  answer: string;
+  action?: ConflictResolutionAction;
+  targetRelativePath?: string;
+  autoApply?: boolean;
+  matchSummary?: string;
+}
+
+export interface ConflictAnswerResult extends CommandMeta {
+  conflictId: string;
+  rule: ConflictRule;
+  markdownPath: string;
+  auditId: number;
+  status: string;
+}
+
+export interface ApplyConflictRuleResult extends CommandMeta {
+  conflictId: string;
+  ruleId: number;
+  status: string;
+  moved: boolean;
+  movementId?: number;
+  message: string;
+  auditId?: number;
 }
 
 export interface ConflictResolutionResult extends CommandMeta {
@@ -527,6 +595,18 @@ function fallbackWorkerStatus(reason: string): WorkerStatus {
   };
 }
 
+function fallbackInboxListenerStatus(reason: string): InboxListenerStatus {
+  return {
+    enabled: false,
+    status: "paused",
+    lastEnqueuedCount: 0,
+    lastError: reason,
+    updatedAt: nowIso(),
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
 function fallbackWorkerRun(reason: string): WorkerRunResult {
   return {
     status: "failed",
@@ -635,8 +715,26 @@ function normalizeQueueStatus(raw: any): QueueStatus {
     completedToday: 0,
     concurrency: 1,
     retryLimit: 3,
-    lastEvent: raw.listener?.lastEventAt ?? raw.listener?.status,
+    lastEvent: raw.listener?.lastEvent ?? raw.listener?.lastEventAt ?? raw.listener?.status,
     updatedAt: raw.listener?.updatedAt ?? nowIso(),
+  };
+}
+
+function normalizeInboxListenerStatus(raw: any): InboxListenerStatus {
+  if (!raw || typeof raw !== "object" || "lastEnqueuedCount" in raw) {
+    return raw as InboxListenerStatus;
+  }
+  return {
+    enabled: Boolean(raw.enabled),
+    status: raw.status ?? "paused",
+    watchPath: raw.watchPath,
+    lastEvent: raw.lastEvent,
+    lastEnqueuedCount: raw.lastEnqueuedCount ?? 0,
+    lastEventAt: raw.lastEventAt,
+    lastError: raw.lastError,
+    updatedAt: raw.updatedAt ?? nowIso(),
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
   };
 }
 
@@ -753,16 +851,23 @@ function normalizeConflict(raw: any): ConflictItem {
   }
   const payload = raw.payload ?? raw;
   const source =
-    payload.sourceRelativePath ?? payload.sourcePath ?? payload.relativePath ?? "";
-  const target = payload.targetRelativePath ?? payload.relativePath ?? "";
+    raw.sourceRelativePath ?? payload.sourceRelativePath ?? payload.sourcePath ?? payload.relativePath ?? "";
+  const target = raw.targetRelativePath ?? payload.targetRelativePath ?? payload.relativePath ?? "";
+  const rawRecommendations = raw.recommendations ?? payload.recommendedRules ?? [];
+  const recommendations = Array.isArray(rawRecommendations) ? rawRecommendations : [];
   return {
     id: String(raw.id ?? raw.eventId ?? payload.id ?? Date.now()),
+    eventId: raw.eventId ?? payload.eventId,
     kind: "target_exists",
+    createdAt: raw.createdAt,
+    status: raw.status ?? payload.status ?? "open",
     sourceRelativePath: source,
     targetRelativePath: target,
-    message: payload.message ?? payload.error ?? "Conflict requires manual handling",
+    message: raw.message ?? payload.message ?? payload.error ?? payload.reason ?? "Conflict requires manual handling",
     options: ["rename", "skip", "keep_existing"],
     recommendedAction: "rename",
+    recommendations,
+    payload,
     isFallback: raw.isFallback,
     fallbackReason: raw.fallbackReason,
   };
@@ -886,6 +991,20 @@ export const commands = {
     invokeWithFallback<string[]>("prewarm_sticky_windows", { count }, () => []),
   getQueueStatus: (vaultPath: string) =>
     invokeWithFallback<any>("get_queue_status", { vaultPath }, fallbackQueueStatus).then(normalizeQueueStatus),
+  getInboxListenerStatus: (vaultPath: string) =>
+    invokeWithFallback<any>(
+      "get_inbox_listener_status",
+      { vaultPath },
+      fallbackInboxListenerStatus,
+    ).then(normalizeInboxListenerStatus),
+  startInboxListener: (vaultPath: string) =>
+    invokeWithFallback<any>("start_inbox_watcher", { vaultPath }, (reason) =>
+      fallbackQueueStatus(reason, { state: "running", lastEvent: "监听启动命令不可用" }),
+    ).then(normalizeQueueStatus),
+  stopInboxListener: (vaultPath: string) =>
+    invokeWithFallback<any>("stop_inbox_watcher", { vaultPath }, (reason) =>
+      fallbackQueueStatus(reason, { state: "paused", lastEvent: "监听停止命令不可用" }),
+    ).then(normalizeQueueStatus),
   getWorkerStatus: (vaultPath: string) =>
     invokeWithFallback<WorkerStatus>("get_worker_status", { vaultPath }, fallbackWorkerStatus),
   runInboxWorker: (vaultPath: string, maxItems = 8) =>
@@ -1095,6 +1214,70 @@ export const commands = {
   listConflicts: (vaultPath: string) =>
     invokeWithFallback<any[]>("list_conflicts", { vaultPath }, () => []).then((items) =>
       items.map(normalizeConflict),
+    ),
+  getConflictDetail: (vaultPath: string, conflictId: string) =>
+    invokeWithFallback<any>(
+      "get_conflict_detail",
+      { vaultPath, conflictId },
+      (reason) => ({
+        id: conflictId,
+        message: "conflict detail command is not available",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeConflict),
+  submitConflictAnswer: (vaultPath: string, input: ConflictAnswerInput) =>
+    invokeWithFallback<ConflictAnswerResult>(
+      "submit_conflict_answer",
+      { vaultPath, input },
+      (reason) => ({
+        conflictId: input.conflictId,
+        rule: {
+          id: 0,
+          ruleKey: "fallback",
+          sourcePattern: "",
+          targetPattern: input.targetRelativePath ?? "",
+          answer: input.answer,
+          action: input.action ?? "rename",
+          autoApply: input.autoApply ?? false,
+          matchSummary: input.matchSummary ?? "",
+          markdownPath: ".thebrain/rules/inbox-organizing-rules.md",
+          status: "fallback",
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+          hitCount: 0,
+        },
+        markdownPath: ".thebrain/rules/inbox-organizing-rules.md",
+        auditId: 0,
+        status: "fallback",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ),
+  matchConflictRules: (
+    vaultPath: string,
+    sourceRelativePath: string,
+    targetRelativePath: string,
+    message?: string,
+  ) =>
+    invokeWithFallback<ConflictRuleMatch[]>(
+      "match_conflict_rules",
+      { vaultPath, sourceRelativePath, targetRelativePath, message },
+      () => [],
+    ),
+  applyConflictRule: (vaultPath: string, conflictId: string, ruleId: number) =>
+    invokeWithFallback<ApplyConflictRuleResult>(
+      "apply_conflict_rule",
+      { vaultPath, conflictId, ruleId },
+      (reason) => ({
+        conflictId,
+        ruleId,
+        status: "fallback",
+        moved: false,
+        message: "apply conflict rule command is not available",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
     ),
   resolveConflict: (
     vaultPath: string,

@@ -72,6 +72,7 @@ import {
   ConflictItem,
   ConflictResolutionAction,
   defaultAppSettings,
+  InboxListenerStatus,
   InboxItem,
   InboxImportResult,
   InboxPlanResult,
@@ -273,10 +274,12 @@ export default function App() {
     readStorage<AppSettings>(settingsStorageKey, defaultAppSettings),
   );
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const [listenerStatus, setListenerStatus] = useState<InboxListenerStatus | null>(null);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null);
   const [workerRunResult, setWorkerRunResult] = useState<WorkerRunResult | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
+  const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
@@ -362,6 +365,7 @@ export default function App() {
 
   const page = pageTitle(activeView);
   const queueIsPaused = !workerStatus?.listener.enabled || workerStatus.listener.status === "paused";
+  const listenerIsRunning = Boolean(listenerStatus?.enabled && listenerStatus.status === "running");
   const budgetRatio =
     budgetStatus && budgetStatus.monthlyLimitCents > 0
       ? Math.min(1, budgetStatus.spentCents / budgetStatus.monthlyLimitCents)
@@ -429,10 +433,11 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextWorker, nextBudget, nextConflicts, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextBudget, nextConflicts, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
+        nextVaultPath ? commands.getInboxListenerStatus(nextVaultPath) : Promise.resolve(null),
         nextVaultPath ? commands.getWorkerStatus(nextVaultPath) : Promise.resolve(null),
         commands.getBudgetStatus(nextVaultPath),
         commands.listConflicts(nextVaultPath),
@@ -446,6 +451,7 @@ export default function App() {
       nextSettings.isFallback ? { ...current, isFallback: true } : { ...current, ...nextSettings },
     );
     setQueueStatus(nextQueue);
+    setListenerStatus(nextListener);
     setWorkerStatus(nextWorker);
     setBudgetStatus(nextBudget);
     setConflicts(nextConflicts);
@@ -609,6 +615,19 @@ export default function App() {
     setWorkerStatus(result);
     const nextQueue = await commands.getQueueStatus(vaultPath);
     setQueueStatus(nextQueue);
+  }
+
+  async function toggleInboxListener() {
+    if (!vaultPath) return;
+    const result = await run(
+      () => (listenerIsRunning ? commands.stopInboxListener(vaultPath) : commands.startInboxListener(vaultPath)),
+      listenerIsRunning ? "停止收集箱监听" : "启动收集箱监听",
+      listenerIsRunning ? "收集箱监听已停止" : "收集箱监听已启动",
+    );
+    if (!result) return;
+    setQueueStatus(result);
+    const nextListener = await commands.getInboxListenerStatus(vaultPath);
+    setListenerStatus(nextListener);
   }
 
   async function runInboxWorker() {
@@ -862,6 +881,44 @@ export default function App() {
     if (result.resolved) {
       setConflicts((items) => items.filter((item) => item.id !== conflict.id));
     }
+  }
+
+  async function recordConflictRule(conflict: ConflictItem) {
+    const answer = (conflictAnswers[conflict.id] ?? "").trim();
+    if (!answer) {
+      setAppError({
+        title: "规则答案为空",
+        detail: "请先写下这类冲突以后应该如何处理。",
+        recovery: "第一版只记录本地可读规则，不会自动覆盖或删除文件。",
+      });
+      return;
+    }
+    const result = await run(
+      () =>
+        commands.submitConflictAnswer(vaultPath, {
+          conflictId: conflict.id,
+          answer,
+          action: "rename",
+          targetRelativePath: conflict.targetRelativePath,
+          autoApply: false,
+          matchSummary: `same target folder as ${conflict.targetRelativePath}`,
+        }),
+      "记录冲突规则",
+      "冲突规则已记录",
+    );
+    if (!result) return;
+    setConflictAnswers((answers) => ({ ...answers, [conflict.id]: "" }));
+    await refreshOperations(vaultPath);
+  }
+
+  async function applyRecommendedRule(conflict: ConflictItem, ruleId: number) {
+    const result = await run(
+      () => commands.applyConflictRule(vaultPath, conflict.id, ruleId),
+      "应用冲突规则",
+      "冲突规则已确认",
+    );
+    if (!result) return;
+    await refreshOperations(vaultPath);
   }
 
   async function submitPrompt(prompt: string, scope: string) {
@@ -1395,6 +1452,10 @@ export default function App() {
             <Zap size={16} aria-hidden="true" />
             运行后台 worker
           </button>
+          <button type="button" className="secondary-button" onClick={toggleInboxListener} disabled={!vaultPath}>
+            {listenerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
+            {listenerIsRunning ? "停止监听" : "启动监听"}
+          </button>
           <button type="button" className="secondary-button" onClick={toggleQueue}>
             {queueIsPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
             {queueIsPaused ? "恢复 worker" : "暂停 worker"}
@@ -1451,6 +1512,19 @@ export default function App() {
                     #{item.queueId} {item.status}: {item.relativePath} {item.message}
                   </span>
                 ))}
+              </div>
+            ) : null}
+            {listenerStatus ? (
+              <div className="operation-summary">
+                <span>
+                  listener {listenerStatus.status}: {listenerStatus.watchPath ?? "未绑定路径"}
+                </span>
+                <span>
+                  最近事件 {listenerStatus.lastEvent ?? "无"} · 入队 {listenerStatus.lastEnqueuedCount}
+                </span>
+                {listenerStatus.isFallback || listenerStatus.lastError ? (
+                  <span>{listenerStatus.fallbackReason ?? listenerStatus.lastError}</span>
+                ) : null}
               </div>
             ) : null}
 
@@ -1570,6 +1644,57 @@ export default function App() {
                 <li>自动提取学习笔记与知识点</li>
                 <li>识别作业、试题与参考资料</li>
               </ul>
+            </section>
+
+            <section className="concept-card">
+              <div className="card-heading">
+                <h3>冲突问题</h3>
+                <span>{conflicts.length}</span>
+              </div>
+              {conflicts.slice(0, 3).map((conflict) => (
+                <article className="schedule-card" key={conflict.id}>
+                  <Shield size={20} aria-hidden="true" />
+                  <div>
+                    <strong>{conflict.sourceRelativePath || "unknown source"}</strong>
+                    <span>{conflict.message}</span>
+                    <small>目标：{conflict.targetRelativePath || "未给出"}</small>
+                    {conflict.recommendations?.length ? (
+                      <small>
+                        推荐规则：{conflict.recommendations[0].rule.answer}（{Math.round(conflict.recommendations[0].score * 100)}%）
+                      </small>
+                    ) : (
+                      <small>暂无相似规则，等待你记录处理方式</small>
+                    )}
+                    <textarea
+                      aria-label="冲突规则答案"
+                      value={conflictAnswers[conflict.id] ?? ""}
+                      onChange={(event) =>
+                        setConflictAnswers((answers) => ({
+                          ...answers,
+                          [conflict.id]: event.target.value,
+                        }))
+                      }
+                      placeholder="这类冲突以后应该如何处理"
+                      rows={3}
+                    />
+                  </div>
+                  {conflict.recommendations?.[0] ? (
+                    <button
+                      type="button"
+                      onClick={() => applyRecommendedRule(conflict, conflict.recommendations![0].rule.id)}
+                    >
+                      应用推荐
+                    </button>
+                  ) : null}
+                  <button type="button" className="secondary-button" onClick={() => recordConflictRule(conflict)}>
+                    记录规则
+                  </button>
+                  <button type="button" className="ghost-button" onClick={() => resolveConflict(conflict, "skip")}>
+                    跳过
+                  </button>
+                </article>
+              ))}
+              {conflicts.length === 0 ? <p className="empty-state">暂无待处理冲突</p> : null}
             </section>
 
             <section className="concept-card">
@@ -2214,6 +2339,7 @@ export default function App() {
           <span>{vaultPath || "未选择 Vault"}</span>
           <span>{status}</span>
           <span>队列：{queueStateLabel(queueStatus?.state)} · 待处理 {queueStatus?.pending ?? 0}</span>
+          <span>监听：{listenerStatus?.status ?? "未连接"} · 入队 {listenerStatus?.lastEnqueuedCount ?? 0}</span>
           <span>Worker：{workerStatus?.listener.status ?? "未连接"} · 冲突 {workerStatus?.conflicts ?? queueStatus?.conflicts ?? 0}</span>
           <span>预算：{budgetStatus ? formatBudget(budgetStatus.remainingCents) : "未连接"}</span>
           <span>MiMo：{mimoStatus?.hasKey ? "ready" : "missing key"}</span>

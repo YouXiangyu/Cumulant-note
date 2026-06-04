@@ -11,6 +11,9 @@ use serde_json::{Map, Value};
 pub struct ListenerStateUpdate {
     pub enabled: bool,
     pub status: String,
+    pub watch_path: Option<String>,
+    pub last_event: Option<String>,
+    pub last_enqueued_count: Option<i64>,
     pub last_event_at: Option<String>,
     pub last_error: Option<String>,
 }
@@ -20,6 +23,9 @@ pub struct ListenerStateUpdate {
 pub struct ListenerState {
     pub enabled: bool,
     pub status: String,
+    pub watch_path: Option<String>,
+    pub last_event: Option<String>,
+    pub last_enqueued_count: i64,
     pub last_event_at: Option<String>,
     pub last_error: Option<String>,
     pub updated_at: String,
@@ -60,7 +66,8 @@ impl QueueService {
         let connection = open_index_for_vault(vault_path)?;
         let state = connection
             .query_row(
-                "SELECT enabled, status, last_event_at, last_error, updated_at
+                "SELECT enabled, status, watch_path, last_event, last_enqueued_count,
+                        last_event_at, last_error, updated_at
                  FROM listener_state
                  WHERE id = 1",
                 [],
@@ -71,6 +78,9 @@ impl QueueService {
         Ok(state.unwrap_or_else(|| ListenerState {
             enabled: false,
             status: "idle".to_string(),
+            watch_path: None,
+            last_event: None,
+            last_enqueued_count: 0,
             last_event_at: None,
             last_error: None,
             updated_at: Utc::now().to_rfc3339(),
@@ -84,19 +94,35 @@ impl QueueService {
         validate_nonempty("listener status", &update.status)?;
         let connection = open_index_for_vault(vault_path)?;
         let now = Utc::now().to_rfc3339();
+        let last_enqueued_count = update.last_enqueued_count.unwrap_or_else(|| {
+            connection
+                .query_row(
+                    "SELECT last_enqueued_count FROM listener_state WHERE id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+        });
         connection.execute(
             "INSERT INTO listener_state
-                (id, enabled, status, last_event_at, last_error, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+                (id, enabled, status, watch_path, last_event, last_enqueued_count,
+                 last_event_at, last_error, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 enabled = excluded.enabled,
                 status = excluded.status,
+                watch_path = COALESCE(excluded.watch_path, listener_state.watch_path),
+                last_event = COALESCE(excluded.last_event, listener_state.last_event),
+                last_enqueued_count = COALESCE(excluded.last_enqueued_count, listener_state.last_enqueued_count),
                 last_event_at = excluded.last_event_at,
                 last_error = excluded.last_error,
                 updated_at = excluded.updated_at",
             params![
                 bool_to_i64(update.enabled),
                 update.status,
+                update.watch_path,
+                update.last_event,
+                last_enqueued_count,
                 update.last_event_at,
                 update.last_error,
                 now
@@ -308,9 +334,12 @@ fn row_to_listener_state(row: &Row<'_>) -> rusqlite::Result<ListenerState> {
     Ok(ListenerState {
         enabled: row.get::<_, i64>(0)? != 0,
         status: row.get(1)?,
-        last_event_at: row.get(2)?,
-        last_error: row.get(3)?,
-        updated_at: row.get(4)?,
+        watch_path: row.get(2)?,
+        last_event: row.get(3)?,
+        last_enqueued_count: row.get(4)?,
+        last_event_at: row.get(5)?,
+        last_error: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -367,6 +396,9 @@ mod tests {
             ListenerStateUpdate {
                 enabled: true,
                 status: "watching".to_string(),
+                watch_path: None,
+                last_event: None,
+                last_enqueued_count: None,
                 last_event_at: Some("2026-05-31T00:00:00Z".to_string()),
                 last_error: None,
             },

@@ -6,14 +6,16 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 
 ## 当前状态
 
-项目当前处于 v0.6 第一层能力打磨阶段。Tauri 2 + React + Vite + Rust 桌面骨架已经可运行，当前实现包含：
+项目当前处于 v0.6 第三层能力打磨阶段。Tauri 2 + React + Vite + Rust 桌面骨架已经可运行，当前实现包含：
 
 - 本地 Vault 选择与初始化。
 - `000-收集箱/` 与 `000-收集箱/收集箱-已整理.md`。
 - `.thebrain/index.sqlite` 内部索引、日志和状态数据库。
 - Markdown 读写、预览、导出和 YAML frontmatter 过滤。
 - 收集箱导入、抽取、整理计划、移动、ledger、movement log、audit events 和回滚。
+- 收集箱监听与自动入队第一版：监听当前 Vault 的 `000-收集箱/`，跳过 ledger、内部目录、隐藏/临时文件和目录项，稳定等待后基于路径、mtime、size 去重入队。
 - 收集箱队列的第一层可信 worker：手动单轮消费 pending 队列、暂停/恢复、稳定等待、预算检查、MiMo 抽取与整理决策、非 mock 且可信时自动移动、失败/冲突写入内部状态。
+- 冲突问题与规则记忆第一版：前端可查看 open conflict、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
 - MiMo provider 路径、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用和 Trace。
 - 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页允许先作为前端概念页保留，部分统计、Agent 历史和学习曲线仍是占位数据。
@@ -55,7 +57,7 @@ AI 可以在用户指定的 Vault 范围内自动整理并移动 `000-收集箱/
 - embedding、AI prompt/response、token usage、移动历史、队列日志不写入 Markdown frontmatter，只进入 `.thebrain` 内部结构。
 - TODO、日程、联系人档案等行动项可以由 AI 生成候选；是否自动写入正式系统需要在后续 PRD 中按场景定义。
 
-当前代码已经具备移动、日志、回滚和手动触发的单并发队列消费能力；长期稳定文件监听、常驻后台 worker、批量处理策略和更完整的自动冲突处理仍是后续目标。
+当前代码已经具备收集箱监听入队、移动、日志、回滚、手动触发的单并发队列消费能力，以及冲突问答与规则记忆第一版；长期常驻自动整理、长时间实机监听稳定性、批量处理策略和更完整的自动冲突处理仍是后续目标。
 
 ## 数据边界
 
@@ -69,11 +71,13 @@ Vault/
     收集箱-已整理.md
   .thebrain/
     index.sqlite
+    rules/
+      inbox-organizing-rules.md
   .secrets/
     mimo_api_key.txt   # 可选，gitignored，不提交
 ```
 
-`.thebrain/index.sqlite` 当前包含：`vault_meta`、`file_index`、`ai_usage`、`audit_events`、`listener_state`、`queue_items`、`dedupe_records`、`budget_settings`、`budget_ledger`、`movement_log`、`action_candidates`、`sticky_notes`、`rag_documents`、`rag_chunks`、`rag_index_runs`、`rag_queries`、`rag_trace_runs`、`rag_trace_nodes`、`rag_conversations`、`rag_messages`。
+`.thebrain/index.sqlite` 当前包含：`vault_meta`、`file_index`、`ai_usage`、`audit_events`、`listener_state`、`queue_items`、`dedupe_records`、`budget_settings`、`budget_ledger`、`movement_log`、`conflict_rules`、`conflict_rule_hits`、`action_candidates`、`sticky_notes`、`rag_documents`、`rag_chunks`、`rag_index_runs`、`rag_queries`、`rag_trace_runs`、`rag_trace_nodes`、`rag_conversations`、`rag_messages`。
 
 ## 凭据与安全
 
@@ -105,21 +109,23 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 前端层：
 
 - `src/App.tsx`：桌面工作台 shell，包含 Vault、收集箱、Markdown、AI 整理、RAG 问答、TODO/日程、便利贴、个人页、项目页和设置页。
-- `src/api.ts`：封装 Tauri commands，暴露受控导入、MiMo 状态、抽取、整理计划、worker、移动、回滚、冲突和 RAG 命令。
+- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、MiMo 状态、抽取、整理计划、worker、移动、回滚、冲突、冲突规则和 RAG 命令。
 - `src/styles.css`：视觉 token、左侧导航、页面网格、收集箱、RAG 面板、Markdown 三栏编辑器和便利贴布局。
 
 本地后端服务层：
 
-- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、MiMo、队列、worker、预算、移动/回滚、候选、便利贴、快捷键、冲突和 RAG commands。
+- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、MiMo、listener、队列、worker、预算、移动/回滚、候选、便利贴、快捷键、冲突和 RAG commands。
 - `src-tauri/src/services/vault.rs`：Vault 初始化和路径规范化。
 - `src-tauri/src/services/importer.rs`：受控复制/移动外部文件到收集箱。
+- `src-tauri/src/services/listener.rs`：收集箱监听入队规则、稳定等待、临时/隐藏/内部文件跳过、mtime/size 去重和 listener 状态更新。
 - `src-tauri/src/services/ai.rs`：MiMo 状态、文本本地抽取、音频/图片 MiMo 抽取、结构化整理 JSON 解析和 fallback。
 - `src-tauri/src/services/worker.rs`：收集箱队列的第一层可信消费器，负责 claim pending item、稳定等待、预算检查、调用 MiMo、可信移动、失败/冲突/audit 记录和手动 drain。
 - `src-tauri/src/services/movement.rs`：收集箱文件移动、ledger、movement log、audit events 和回滚。
+- `src-tauri/src/services/conflict_rules.rs`：冲突问题详情、用户答案规则写入、规则索引、相似规则推荐和确认后应用。
 - `src-tauri/src/services/rag.rs`、`retrieval.rs`、`chunking.rs`、`rag_trace.rs`：本地 RAG 索引、检索、分块、引用和 Trace。
 - `src-tauri/src/services/index.rs`：`.thebrain/index.sqlite` schema。
 
-MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker：它只处理 `000-收集箱/` 中的普通文件，不处理 ledger、`.thebrain` 或 `.secrets`；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件。长期常驻 worker、完整去重策略和冲突问答仍是后续目标。
+MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；listener 只负责发现 `000-收集箱/` 中允许处理的普通文件并稳定去重入队；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker：它只处理 `000-收集箱/` 中的普通文件，不处理 ledger、`.thebrain` 或 `.secrets`；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件。冲突规则第一版只做推荐与用户确认应用，规则 Markdown 位于 `.thebrain/rules/`，不会被 listener 或 RAG 当作用户内容处理。长期常驻 worker、批量策略和完整冲突恢复体验仍是后续目标。
 
 ## 使用方式
 
@@ -138,6 +144,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后
 - Markdown 编辑、预览、保存、导出和 YAML frontmatter 过滤。
 - `000-收集箱` 文件展示与 ledger 相对 wikilink 历史映射。
 - 受控导入命令 `import_to_inbox`，支持 copy/move、冲突不覆盖、audit/queue 记录。
+- 收集箱 listener 命令 `get_inbox_listener_status`、`start_inbox_watcher`、`stop_inbox_watcher`、`scan_inbox_queue`，支持启动、停止、查询状态和手动扫描入队。
 - MiMo 状态命令 `get_mimo_status`，不泄露 key。
 - 抽取命令 `extract_with_mimo`，支持文本本地抽取和音频/图片 MiMo 调用路径。
 - 单文件计划命令 `plan_inbox_item`，返回 extraction、structured plan、候选和预算状态。
@@ -146,7 +153,8 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后
 - 回滚命令 `rollback_move`，不覆盖已有文件。
 - TODO/日程候选创建、确认、忽略。
 - 预算暂停/耗尽状态和 `ai_usage` 用量占位记录。
-- 冲突事件列表与解决记录命令。
+- 冲突事件列表、详情、解决记录、用户答案写入规则、相似规则推荐和确认应用命令。
+- 冲突规则 Markdown 文件 `.thebrain/rules/inbox-organizing-rules.md` 与 SQLite 规则索引/命中记录。
 - 设置页展示 MiMo key 状态，只显示 key 来源和脱敏状态。
 - 全局快捷键插件依赖和注册命令已接入。
 - RAG 文档、分块、索引运行、查询、Trace、会话和消息基础表。
@@ -154,11 +162,10 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后
 
 ## 未完成目标
 
-- 长期常驻 worker、长期文件监听稳定性、批量处理策略和更完整的自动整理策略。
-- 收集箱冲突问答窗口：遇到分类、命名或目标路径冲突时询问用户，并把用户回答保存为可复用整理规则。
+- 长期常驻自动整理 worker、长时间实机监听稳定性、批量处理策略和更完整的自动整理策略。
 - 真实 MiMo API 的长时间、多文件类型、带成本实机联调。
 - MiMo 返回 token/cost 的真实精确统计。
-- 完整冲突解决 UI，例如自动重命名建议、差异预览和批量处理。
+- 完整冲突解决 UI，例如自动重命名建议、差异预览、批量处理、规则禁用/编辑和更细的恢复体验。
 - 真实 embedding、向量检索、重排模型、跨会话长期记忆策略和复杂个人统计。
 - RAG 多轮会话 UI 与历史列表。
 - PDF、DOCX、PPTX、URL 的真实解析。
@@ -186,4 +193,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；后
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、队列 claim/retry、预算、audit、导入、MiMo fallback、worker 暂停与失败不移动、移动/回滚、TODO/日程候选、便利贴和 RAG 基础能力。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、收集箱 listener 跳过规则/稳定等待/去重、队列 claim/retry、预算、audit、导入、MiMo fallback、worker 暂停与失败不移动、移动/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则路径不被 listener 处理、TODO/日程候选、便利贴和 RAG 基础能力。

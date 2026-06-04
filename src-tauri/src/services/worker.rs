@@ -1,6 +1,7 @@
 use crate::services::ai::{MimoExtractInput, MimoProvider};
 use crate::services::audit::AuditService;
 use crate::services::budget::BudgetService;
+use crate::services::conflict_rules::ConflictRuleService;
 use crate::services::movement::{MoveRequest, MovementService};
 use crate::services::queue::{ListenerState, ListenerStateUpdate, QueueItem, QueueService};
 use crate::services::vault::{
@@ -9,7 +10,7 @@ use crate::services::vault::{
 use crate::services::{ServiceError, ServiceResult};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 
@@ -77,6 +78,9 @@ impl WorkerService {
             ListenerStateUpdate {
                 enabled: false,
                 status: "paused".to_string(),
+                watch_path: None,
+                last_event: Some("worker paused".to_string()),
+                last_enqueued_count: None,
                 last_event_at: Some(Utc::now().to_rfc3339()),
                 last_error: None,
             },
@@ -90,6 +94,9 @@ impl WorkerService {
             ListenerStateUpdate {
                 enabled: true,
                 status: "idle".to_string(),
+                watch_path: None,
+                last_event: Some("worker resumed".to_string()),
+                last_enqueued_count: None,
                 last_event_at: Some(Utc::now().to_rfc3339()),
                 last_error: None,
             },
@@ -126,6 +133,9 @@ impl WorkerService {
             ListenerStateUpdate {
                 enabled: true,
                 status: "running".to_string(),
+                watch_path: None,
+                last_event: Some("worker running".to_string()),
+                last_enqueued_count: None,
                 last_event_at: Some(Utc::now().to_rfc3339()),
                 last_error: None,
             },
@@ -167,6 +177,9 @@ impl WorkerService {
             ListenerStateUpdate {
                 enabled: true,
                 status: final_status.to_string(),
+                watch_path: None,
+                last_event: Some("worker drain finished".to_string()),
+                last_enqueued_count: None,
                 last_event_at: Some(Utc::now().to_rfc3339()),
                 last_error: None,
             },
@@ -288,6 +301,12 @@ impl WorkerService {
                 "failed"
             };
             QueueService::finish(vault_path, item.id, queue_status, Some(&message))?;
+            let recommendations = conflict_recommendations(
+                vault_path,
+                &relative_path,
+                &decision.target_relative_path,
+                &message,
+            );
             AuditService::record(
                 vault_path,
                 if queue_status == "conflict" {
@@ -302,7 +321,8 @@ impl WorkerService {
                     "status": "open",
                     "stage": "plan",
                     "isMock": decision.is_mock,
-                    "reason": message
+                    "reason": message,
+                    "recommendedRules": recommendations
                 }),
             )?;
             return Ok(item_result(item, queue_status, message, None));
@@ -338,6 +358,12 @@ impl WorkerService {
             }
             Err(ServiceError::Conflict(message)) => {
                 QueueService::finish(vault_path, item.id, "conflict", Some(&message))?;
+                let recommendations = conflict_recommendations(
+                    vault_path,
+                    &relative_path,
+                    &decision.target_relative_path,
+                    &message,
+                );
                 AuditService::record(
                     vault_path,
                     "conflict",
@@ -347,7 +373,8 @@ impl WorkerService {
                         "targetRelativePath": decision.target_relative_path,
                         "status": "open",
                         "stage": "move",
-                        "reason": message
+                        "reason": message,
+                        "recommendedRules": recommendations
                     }),
                 )?;
                 Ok(item_result(item, "conflict", message, None))
@@ -426,6 +453,23 @@ fn item_result(
         status: status.to_string(),
         message,
         movement_id,
+    }
+}
+
+fn conflict_recommendations(
+    vault_path: &str,
+    source_relative_path: &str,
+    target_relative_path: &str,
+    message: &str,
+) -> Value {
+    match ConflictRuleService::match_rules(
+        vault_path,
+        source_relative_path.to_string(),
+        target_relative_path.to_string(),
+        Some(message.to_string()),
+    ) {
+        Ok(matches) => serde_json::to_value(matches).unwrap_or_else(|_| json!([])),
+        Err(_) => json!([]),
     }
 }
 

@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-            VALUES ('schema_version', '3', ?1)
+            VALUES ('schema_version', '5', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 3;
+            PRAGMA user_version = 5;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -75,6 +75,9 @@ impl IndexService {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 enabled INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
+                watch_path TEXT,
+                last_event TEXT,
+                last_enqueued_count INTEGER NOT NULL DEFAULT 0,
                 last_event_at TEXT,
                 last_error TEXT,
                 updated_at TEXT NOT NULL
@@ -148,6 +151,40 @@ impl IndexService {
             );
             CREATE INDEX IF NOT EXISTS idx_movement_log_status
                 ON movement_log(status);
+
+            CREATE TABLE IF NOT EXISTS conflict_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_key TEXT NOT NULL UNIQUE,
+                source_pattern TEXT NOT NULL,
+                target_pattern TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                action TEXT NOT NULL,
+                auto_apply INTEGER NOT NULL DEFAULT 0,
+                match_summary TEXT NOT NULL,
+                markdown_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                hit_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_conflict_rules_status_hits
+                ON conflict_rules(status, hit_count);
+
+            CREATE TABLE IF NOT EXISTS conflict_rule_hits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                conflict_id INTEGER,
+                source_relative_path TEXT,
+                target_relative_path TEXT,
+                score REAL NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                applied_at TEXT,
+                FOREIGN KEY(rule_id) REFERENCES conflict_rules(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_conflict_rule_hits_rule_status
+                ON conflict_rule_hits(rule_id, status, created_at);
 
             CREATE TABLE IF NOT EXISTS action_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,8 +334,36 @@ impl IndexService {
                 ON rag_messages(conversation_id, created_at);
             ",
         )?;
+        ensure_column(connection, "listener_state", "watch_path", "TEXT")?;
+        ensure_column(connection, "listener_state", "last_event", "TEXT")?;
+        ensure_column(
+            connection,
+            "listener_state",
+            "last_enqueued_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(())
     }
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> ServiceResult<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )?;
+    Ok(())
 }
 
 pub fn open_index_for_vault(vault_path: &str) -> ServiceResult<Connection> {
@@ -336,6 +401,8 @@ mod tests {
                     'budget_settings',
                     'budget_ledger',
                     'movement_log',
+                    'conflict_rules',
+                    'conflict_rule_hits',
                     'action_candidates',
                     'sticky_notes',
                     'rag_documents',
@@ -351,6 +418,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 20);
+        assert_eq!(table_count, 22);
     }
 }
