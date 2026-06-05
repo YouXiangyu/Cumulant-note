@@ -80,6 +80,8 @@ import {
   MarkdownDocument,
   MimoExtractResult,
   MimoStatus,
+  MoveLog,
+  QueueItem,
   QueueStatus,
   RagAnswer,
   RagIndexRun,
@@ -280,6 +282,7 @@ export default function App() {
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
+  const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
@@ -433,7 +436,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextBudget, nextConflicts, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextBudget, nextConflicts, nextMoveLogs, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -441,6 +444,7 @@ export default function App() {
         nextVaultPath ? commands.getWorkerStatus(nextVaultPath) : Promise.resolve(null),
         commands.getBudgetStatus(nextVaultPath),
         commands.listConflicts(nextVaultPath),
+        nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
         commands.listTodoScheduleCandidates(nextVaultPath),
         commands.listStickyNotes(nextVaultPath),
         nextVaultPath ? commands.getMimoStatus(nextVaultPath) : Promise.resolve(null),
@@ -455,6 +459,7 @@ export default function App() {
     setWorkerStatus(nextWorker);
     setBudgetStatus(nextBudget);
     setConflicts(nextConflicts);
+    setMoveLogs(nextMoveLogs);
     setTodoCandidates(nextTodoCandidates);
     if (nextNotes.length > 0) {
       setStickyNotes(nextNotes);
@@ -639,6 +644,51 @@ export default function App() {
     );
     if (!result) return;
     setWorkerRunResult(result);
+    await refresh(vaultPath);
+  }
+
+  async function scanInboxQueue() {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.scanInboxQueue(vaultPath),
+      "扫描收集箱入队",
+      "扫描已完成",
+    );
+    if (!result) return;
+    setQueueStatus(result);
+    await refreshOperations(vaultPath);
+  }
+
+  async function retryQueueItem(item: QueueItem) {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.retryQueueItem(vaultPath, item.id),
+      "重试队列项",
+      "队列项已恢复待处理",
+    );
+    if (!result) return;
+    await refreshOperations(vaultPath);
+  }
+
+  async function skipQueueItem(item: QueueItem) {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.skipQueueItem(vaultPath, item.id, "user skipped from inbox recovery panel"),
+      "跳过队列项",
+      "队列项已跳过",
+    );
+    if (!result) return;
+    await refreshOperations(vaultPath);
+  }
+
+  async function rollbackMoveLog(log: MoveLog) {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.rollbackMove(vaultPath, String(log.id), log.sourceRelativePath),
+      "回滚移动记录",
+      "移动记录已回滚",
+    );
+    if (!result) return;
     await refresh(vaultPath);
   }
 
@@ -940,6 +990,203 @@ export default function App() {
     if (!result) return;
     setRagAnswer(result);
     setRagTrace(result.trace);
+  }
+
+  function queueIssueMessage(item: QueueItem): string {
+    const payload = item.payload ?? {};
+    const message =
+      payload.lastError ??
+      payload.error ??
+      payload.reason ??
+      payload.message ??
+      payload.skippedReason ??
+      "未记录具体原因";
+    return String(message);
+  }
+
+  function renderInboxStatusPanel() {
+    const issueItems = [
+      ...(queueStatus?.items?.failed ?? []),
+      ...(queueStatus?.items?.conflicts ?? []),
+    ].slice(0, 6);
+    const recentEvent =
+      listenerStatus?.lastEvent ??
+      queueStatus?.lastEvent ??
+      workerRunResult?.items[0]?.message ??
+      "暂无事件";
+    const recentError =
+      listenerStatus?.lastError ??
+      (queueStatus?.items?.failed?.[0] ? queueIssueMessage(queueStatus.items.failed[0]) : undefined);
+    const featuredConflict = conflicts[0];
+    return (
+      <section className="concept-card inbox-status-panel">
+        <div className="card-heading">
+          <h3>
+            <Activity size={18} aria-hidden="true" />
+            整理状态面板
+          </h3>
+          <button type="button" className="ghost-button" onClick={() => refresh(vaultPath)} disabled={!vaultPath}>
+            <RefreshCw size={16} aria-hidden="true" />
+            刷新
+          </button>
+        </div>
+        <div className="status-metric-grid">
+          <div>
+            <span>Listener</span>
+            <strong>{listenerStatus?.status ?? "未连接"}</strong>
+            <small>{listenerStatus?.watchPath ?? "未绑定路径"}</small>
+          </div>
+          <div>
+            <span>Queue</span>
+            <strong>{queueStateLabel(queueStatus?.state)}</strong>
+            <small>
+              pending {queueStatus?.pending ?? 0} · failed {queueStatus?.failed ?? 0} · conflict {queueStatus?.conflicts ?? 0} · completed {queueStatus?.completedToday ?? 0}
+            </small>
+          </div>
+          <div>
+            <span>Worker</span>
+            <strong>{workerStatus?.listener.status ?? "未连接"}</strong>
+            <small>running {workerStatus?.running ?? 0} · failed {workerStatus?.failed ?? 0}</small>
+          </div>
+          <div>
+            <span>Movement</span>
+            <strong>{moveLogs.filter((log) => log.status === "moved").length}</strong>
+            <small>可回滚移动记录</small>
+          </div>
+        </div>
+        <div className="recovery-action-row">
+          <button type="button" className="secondary-button" onClick={toggleInboxListener} disabled={!vaultPath}>
+            {listenerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
+            {listenerIsRunning ? "停止监听" : "启动监听"}
+          </button>
+          <button type="button" className="secondary-button" onClick={scanInboxQueue} disabled={!vaultPath}>
+            <RefreshCw size={16} aria-hidden="true" />
+            扫描入队
+          </button>
+          <button type="button" className="secondary-button" onClick={toggleQueue} disabled={!vaultPath}>
+            {queueIsPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
+            {queueIsPaused ? "恢复 worker" : "暂停 worker"}
+          </button>
+          <button type="button" onClick={runInboxWorker} disabled={!vaultPath || queueIsPaused}>
+            <Zap size={16} aria-hidden="true" />
+            运行 worker
+          </button>
+          <button type="button" className="ghost-button" onClick={() => setStatus(`当前 open conflict：${conflicts.length}`)} disabled={!vaultPath}>
+            <Shield size={16} aria-hidden="true" />
+            查看冲突 {conflicts.length}
+          </button>
+        </div>
+        <div className="status-event-grid">
+          <div>
+            <span>最近事件</span>
+            <strong>{recentEvent}</strong>
+            <small>{listenerStatus?.lastEventAt ?? queueStatus?.updatedAt ?? "未记录时间"}</small>
+          </div>
+          <div>
+            <span>最近错误</span>
+            <strong>{recentError ?? "暂无错误"}</strong>
+            <small>{listenerStatus?.fallbackReason ?? queueStatus?.fallbackReason ?? "真实命令状态"}</small>
+          </div>
+        </div>
+        {issueItems.length > 0 ? (
+          <div className="queue-issue-list">
+            {issueItems.map((item) => (
+              <article key={item.id}>
+                <div>
+                  <strong>#{item.id} {item.relativePath}</strong>
+                  <span>{item.status} · attempts {item.attempts}/{item.maxAttempts}</span>
+                  <small>{queueIssueMessage(item)}</small>
+                </div>
+                <button type="button" className="secondary-button" onClick={() => retryQueueItem(item)}>
+                  重试
+                </button>
+                <button type="button" className="ghost-button" onClick={() => skipQueueItem(item)}>
+                  跳过
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">暂无失败或冲突队列项</p>
+        )}
+        {featuredConflict ? (
+          <div className="status-conflict-card">
+            <div>
+              <span>待处理冲突</span>
+              <strong>{featuredConflict.sourceRelativePath || "unknown source"}</strong>
+              <small>{featuredConflict.message} · 目标 {featuredConflict.targetRelativePath || "未给出"}</small>
+              <textarea
+                aria-label="状态面板冲突规则答案"
+                value={conflictAnswers[featuredConflict.id] ?? ""}
+                onChange={(event) =>
+                  setConflictAnswers((answers) => ({
+                    ...answers,
+                    [featuredConflict.id]: event.target.value,
+                  }))
+                }
+                placeholder="记录这类冲突以后应该如何处理"
+                rows={2}
+              />
+            </div>
+            {featuredConflict.recommendations?.[0] ? (
+              <button
+                type="button"
+                onClick={() => applyRecommendedRule(featuredConflict, featuredConflict.recommendations![0].rule.id)}
+              >
+                应用推荐
+              </button>
+            ) : null}
+            <button type="button" className="secondary-button" onClick={() => recordConflictRule(featuredConflict)}>
+              记录规则
+            </button>
+            <button type="button" className="ghost-button" onClick={() => resolveConflict(featuredConflict, "skip")}>
+              跳过冲突
+            </button>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderMovementLogPanel() {
+    const recentLogs = moveLogs.slice(0, 10);
+    return (
+      <section className="concept-card movement-log-card">
+        <div className="card-heading">
+          <h3>
+            <RotateCcw size={18} aria-hidden="true" />
+            Movement log
+          </h3>
+          <span>{moveLogs.length} 条记录</span>
+        </div>
+        {recentLogs.length > 0 ? (
+          <div className="movement-log-list">
+            {recentLogs.map((log) => (
+              <article key={log.id}>
+                <div>
+                  <strong>#{log.id} {log.status}</strong>
+                  <span>{log.sourceRelativePath} {"->"} {log.targetRelativePath}</span>
+                  <small>
+                    {formatDate(log.movedAt ?? log.createdAt)}
+                    {log.error ? ` · ${log.error}` : ""}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => rollbackMoveLog(log)}
+                  disabled={!vaultPath || log.status !== "moved"}
+                >
+                  回滚
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">暂无移动记录</p>
+        )}
+      </section>
+    );
   }
 
   function handleDragEnter(event: React.DragEvent<HTMLElement>) {
@@ -1465,6 +1712,7 @@ export default function App() {
         <section className="inbox-layout">
           <div className="inbox-main">
             {renderImportZone()}
+            {renderInboxStatusPanel()}
             <div className="import-options">
               <label>
                 <input
@@ -1619,6 +1867,7 @@ export default function App() {
                 </div>
               ) : null}
             </section>
+            {renderMovementLogPanel()}
           </div>
 
           <aside className="inbox-aside">

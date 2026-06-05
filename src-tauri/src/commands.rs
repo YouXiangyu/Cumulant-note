@@ -46,6 +46,7 @@ pub struct QueueStatus {
     pub running: Vec<QueueItem>,
     pub failed: Vec<QueueItem>,
     pub conflicts: Vec<QueueItem>,
+    pub completed: Vec<QueueItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +243,24 @@ pub fn resume_queue(vault_path: String) -> Result<QueueStatus, String> {
         ListenerService::mark_running(&vault_path, inbox.to_string_lossy().to_string())
             .and_then(|_| queue_status(&vault_path)),
     )
+}
+
+#[tauri::command]
+pub fn retry_queue_item(vault_path: String, queue_id: i64) -> Result<QueueItem, String> {
+    into_command_result(QueueService::retry_item(&vault_path, queue_id))
+}
+
+#[tauri::command]
+pub fn skip_queue_item(
+    vault_path: String,
+    queue_id: i64,
+    reason: Option<String>,
+) -> Result<QueueItem, String> {
+    into_command_result(QueueService::skip_item(
+        &vault_path,
+        queue_id,
+        reason.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -715,5 +734,6 @@ fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus>
         running: QueueService::list_by_status(vault_path, "running")?,
         failed: QueueService::list_by_status(vault_path, "failed")?,
         conflicts: QueueService::list_by_status(vault_path, "conflict")?,
+        completed: QueueService::list_by_status(vault_path, "completed")?,
     })
 }

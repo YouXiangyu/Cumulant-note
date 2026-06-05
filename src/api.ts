@@ -193,6 +193,28 @@ export interface QueueStatus extends CommandMeta {
   cooldownUntil?: string;
   lastEvent?: string;
   updatedAt: string;
+  items?: {
+    pending: QueueItem[];
+    running: QueueItem[];
+    failed: QueueItem[];
+    conflicts: QueueItem[];
+    completed: QueueItem[];
+  };
+}
+
+export interface QueueItem extends CommandMeta {
+  id: number;
+  kind: string;
+  relativePath: string;
+  status: string;
+  dedupeKey?: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+  maxAttempts: number;
+  lockedAt?: string;
+  runAfter?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface WorkerStatus extends CommandMeta {
@@ -319,6 +341,19 @@ export interface RollbackResult extends CommandMeta {
   rolledBack: boolean;
   restoredRelativePath?: string;
   message: string;
+}
+
+export interface MoveLog extends CommandMeta {
+  id: number;
+  operation: string;
+  sourceRelativePath: string;
+  targetRelativePath: string;
+  reason?: string;
+  status: string;
+  createdAt: string;
+  movedAt?: string;
+  rolledBackAt?: string;
+  error?: string;
 }
 
 export interface TodoScheduleCandidate extends CommandMeta {
@@ -572,6 +607,7 @@ function fallbackQueueStatus(reason: string, overrides: Partial<QueueStatus> = {
     retryLimit: defaultAppSettings.retryLimit,
     lastEvent: "后台队列命令尚未接入",
     updatedAt: nowIso(),
+    items: { pending: [], running: [], failed: [], conflicts: [], completed: [] },
     isFallback: true,
     fallbackReason: reason,
     ...overrides,
@@ -696,6 +732,11 @@ function normalizeQueueStatus(raw: any): QueueStatus {
   if (!raw || typeof raw !== "object" || "state" in raw) {
     return raw as QueueStatus;
   }
+  const pending = Array.isArray(raw.pending) ? raw.pending.map(normalizeQueueItem) : [];
+  const running = Array.isArray(raw.running) ? raw.running.map(normalizeQueueItem) : [];
+  const failed = Array.isArray(raw.failed) ? raw.failed.map(normalizeQueueItem) : [];
+  const conflicts = Array.isArray(raw.conflicts) ? raw.conflicts.map(normalizeQueueItem) : [];
+  const completed = Array.isArray(raw.completed) ? raw.completed.map(normalizeQueueItem) : [];
   const listenerStatus = raw.listener?.status ?? "idle";
   const state: QueueStatus["state"] =
     listenerStatus === "paused" || raw.listener?.enabled === false
@@ -707,16 +748,39 @@ function normalizeQueueStatus(raw: any): QueueStatus {
           : "idle";
   return {
     state,
-    active: raw.running?.length ?? 0,
-    pending: raw.pending?.length ?? 0,
+    active: running.length,
+    pending: pending.length,
     retrying: 0,
-    failed: raw.failed?.length ?? 0,
-    conflicts: raw.conflicts?.length ?? 0,
-    completedToday: 0,
+    failed: failed.length,
+    conflicts: conflicts.length,
+    completedToday: completed.length,
     concurrency: 1,
     retryLimit: 3,
     lastEvent: raw.listener?.lastEvent ?? raw.listener?.lastEventAt ?? raw.listener?.status,
     updatedAt: raw.listener?.updatedAt ?? nowIso(),
+    items: { pending, running, failed, conflicts, completed },
+  };
+}
+
+function normalizeQueueItem(raw: any): QueueItem {
+  if (!raw || typeof raw !== "object") {
+    return raw as QueueItem;
+  }
+  return {
+    id: Number(raw.id),
+    kind: raw.kind ?? "",
+    relativePath: raw.relativePath ?? raw.relative_path ?? "",
+    status: raw.status ?? "",
+    dedupeKey: raw.dedupeKey ?? raw.dedupe_key,
+    payload: raw.payload ?? {},
+    attempts: Number(raw.attempts ?? 0),
+    maxAttempts: Number(raw.maxAttempts ?? raw.max_attempts ?? 0),
+    lockedAt: raw.lockedAt ?? raw.locked_at,
+    runAfter: raw.runAfter ?? raw.run_after,
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? nowIso(),
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
   };
 }
 
@@ -826,6 +890,26 @@ function normalizeRollbackResult(raw: any): RollbackResult {
     rolledBack: raw.status === "rolled_back",
     restoredRelativePath: raw.sourceRelativePath,
     message: raw.status === "rolled_back" ? "文件已回滚到收集箱" : raw.status,
+  };
+}
+
+function normalizeMoveLog(raw: any): MoveLog {
+  if (!raw || typeof raw !== "object") {
+    return raw as MoveLog;
+  }
+  return {
+    id: Number(raw.id),
+    operation: raw.operation ?? "",
+    sourceRelativePath: raw.sourceRelativePath ?? raw.source_relative_path ?? "",
+    targetRelativePath: raw.targetRelativePath ?? raw.target_relative_path ?? "",
+    reason: raw.reason,
+    status: raw.status ?? "",
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    movedAt: raw.movedAt ?? raw.moved_at,
+    rolledBackAt: raw.rolledBackAt ?? raw.rolled_back_at,
+    error: raw.error,
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
   };
 }
 
@@ -1017,6 +1101,10 @@ export const commands = {
     invokeWithFallback<WorkerStatus>("pause_inbox_worker", { vaultPath }, fallbackWorkerStatus),
   resumeInboxWorker: (vaultPath: string) =>
     invokeWithFallback<WorkerStatus>("resume_inbox_worker", { vaultPath }, fallbackWorkerStatus),
+  scanInboxQueue: (vaultPath: string) =>
+    invokeWithFallback<any>("scan_inbox_queue", { vaultPath }, (reason) =>
+      fallbackQueueStatus(reason, { lastEvent: "扫描入队命令不可用" }),
+    ).then(normalizeQueueStatus),
   pauseQueue: (vaultPath: string) =>
     invokeWithFallback<any>("stop_inbox_watcher", { vaultPath }, (reason) =>
       fallbackQueueStatus(reason, { state: "paused", lastEvent: "队列已在前端标记为暂停" }),
@@ -1025,6 +1113,42 @@ export const commands = {
     invokeWithFallback<any>("start_inbox_watcher", { vaultPath }, (reason) =>
       fallbackQueueStatus(reason, { state: "running", lastEvent: "队列已在前端标记为运行" }),
     ).then(normalizeQueueStatus),
+  retryQueueItem: (vaultPath: string, queueId: number) =>
+    invokeWithFallback<any>(
+      "retry_queue_item",
+      { vaultPath, queueId },
+      (reason) => ({
+        id: queueId,
+        kind: "",
+        relativePath: "",
+        status: "failed",
+        payload: {},
+        attempts: 0,
+        maxAttempts: 0,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeQueueItem),
+  skipQueueItem: (vaultPath: string, queueId: number, reason = "skipped from inbox recovery panel") =>
+    invokeWithFallback<any>(
+      "skip_queue_item",
+      { vaultPath, queueId, reason },
+      (fallbackReason) => ({
+        id: queueId,
+        kind: "",
+        relativePath: "",
+        status: "failed",
+        payload: {},
+        attempts: 0,
+        maxAttempts: 0,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        isFallback: true,
+        fallbackReason,
+      }),
+    ).then(normalizeQueueItem),
   getBudgetStatus: (vaultPath: string) =>
     invokeWithFallback<any>("get_budget_status", { vaultPath }, fallbackBudgetStatus).then(normalizeBudgetStatus),
   saveBudgetSettings: (vaultPath: string, settings: BudgetSettings) =>
@@ -1127,7 +1251,7 @@ export const commands = {
   rollbackMove: (vaultPath: string, auditId?: string, sourceRelativePath?: string) =>
     invokeWithFallback<any>(
       "rollback_move",
-      { vaultPath, auditId, sourceRelativePath },
+      { vaultPath, movementId: auditId ? Number(auditId) : undefined, auditId, sourceRelativePath },
       (reason) => ({
         auditId,
         rolledBack: false,
@@ -1137,6 +1261,10 @@ export const commands = {
         fallbackReason: reason,
       }),
     ).then(normalizeRollbackResult),
+  listMoveLogs: (vaultPath: string) =>
+    invokeWithFallback<any[]>("list_move_logs", { vaultPath }, () => []).then((items) =>
+      items.map(normalizeMoveLog),
+    ),
   listTodoScheduleCandidates: (vaultPath: string) =>
     invokeWithFallback<any[]>(
       "list_todo_schedule_candidates",

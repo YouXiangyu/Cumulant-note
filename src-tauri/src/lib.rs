@@ -41,6 +41,8 @@ pub fn run() {
             commands::scan_inbox_queue,
             commands::pause_queue,
             commands::resume_queue,
+            commands::retry_queue_item,
+            commands::skip_queue_item,
             commands::start_inbox_watcher,
             commands::stop_inbox_watcher,
             commands::get_budget_status,

@@ -231,6 +231,61 @@ impl QueueService {
         get_queue_item(&connection, id)
     }
 
+    pub fn retry_item(vault_path: &str, id: i64) -> ServiceResult<QueueItem> {
+        let connection = open_index_for_vault(vault_path)?;
+        let item = get_queue_item(&connection, id)?;
+        if !matches!(item.status.as_str(), "failed" | "conflict" | "running") {
+            return Err(ServiceError::InvalidState(format!(
+                "queue item {id} with status {} is not retryable",
+                item.status
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "UPDATE queue_items
+             SET status = 'pending',
+                 locked_at = NULL,
+                 run_after = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        get_queue_item(&connection, id)
+    }
+
+    pub fn skip_item(vault_path: &str, id: i64, reason: Option<&str>) -> ServiceResult<QueueItem> {
+        let connection = open_index_for_vault(vault_path)?;
+        let item = get_queue_item(&connection, id)?;
+        if !matches!(
+            item.status.as_str(),
+            "pending" | "failed" | "conflict" | "running"
+        ) {
+            return Err(ServiceError::InvalidState(format!(
+                "queue item {id} with status {} is not skippable",
+                item.status
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut payload = item.payload;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "skippedReason".to_string(),
+                Value::String(reason.unwrap_or("skipped by user").to_string()),
+            );
+        }
+        connection.execute(
+            "UPDATE queue_items
+             SET status = 'skipped',
+                 payload_json = ?1,
+                 locked_at = NULL,
+                 run_after = NULL,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![serde_json::to_string(&payload)?, now, id],
+        )?;
+        get_queue_item(&connection, id)
+    }
+
     pub fn finish(
         vault_path: &str,
         id: i64,
@@ -496,5 +551,47 @@ mod tests {
             QueueService::retry_later(temp.path().to_str().unwrap(), item.id, 30, "wait").unwrap();
         assert_eq!(retried.status, "pending");
         assert!(retried.run_after.is_some());
+    }
+
+    #[test]
+    fn queue_items_can_be_retried_or_skipped_without_touching_files() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+
+        let failed = QueueService::enqueue(
+            temp.path().to_str().unwrap(),
+            QueueItemInput {
+                kind: "inbox_file_changed".to_string(),
+                relative_path: "000-收集箱/a.md".to_string(),
+                dedupe_key: None,
+                payload: Some(json!({ "source": "test" })),
+                max_attempts: Some(3),
+                run_after: None,
+            },
+        )
+        .unwrap();
+        QueueService::finish(
+            temp.path().to_str().unwrap(),
+            failed.id,
+            "failed",
+            Some("boom"),
+        )
+        .unwrap();
+
+        let retried = QueueService::retry_item(temp.path().to_str().unwrap(), failed.id).unwrap();
+        assert_eq!(retried.status, "pending");
+        assert!(retried.locked_at.is_none());
+        assert!(retried.run_after.is_none());
+
+        let skipped =
+            QueueService::skip_item(temp.path().to_str().unwrap(), failed.id, Some("user skip"))
+                .unwrap();
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.payload["skippedReason"], "user skip");
+
+        let completed =
+            QueueService::mark_status(temp.path().to_str().unwrap(), failed.id, "completed")
+                .unwrap();
+        assert!(QueueService::retry_item(temp.path().to_str().unwrap(), completed.id).is_err());
     }
 }

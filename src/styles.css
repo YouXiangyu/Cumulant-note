@@ -944,6 +944,133 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.inbox-status-panel {
+  gap: 14px;
+}
+
+.status-metric-grid,
+.status-event-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.status-metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.status-event-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.status-metric-grid div,
+.status-event-grid div {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  min-height: 78px;
+  padding: 12px;
+}
+
+.status-metric-grid span,
+.status-event-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-metric-grid strong,
+.status-event-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-metric-grid small,
+.status-event-grid small {
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.queue-issue-list,
+.movement-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-issue-list article,
+.movement-log-list article,
+.status-conflict-card {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 58px;
+  padding: 10px;
+}
+
+.movement-log-list article {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.status-conflict-card {
+  background: var(--amber-soft);
+  border-color: #ead2a9;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+.queue-issue-list article div,
+.movement-log-list article div,
+.status-conflict-card div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.queue-issue-list strong,
+.queue-issue-list span,
+.queue-issue-list small,
+.movement-log-list strong,
+.movement-log-list span,
+.movement-log-list small,
+.status-conflict-card strong,
+.status-conflict-card span,
+.status-conflict-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-issue-list span,
+.queue-issue-list small,
+.movement-log-list span,
+.movement-log-list small,
+.status-conflict-card span,
+.status-conflict-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-conflict-card textarea {
+  margin-top: 6px;
+  min-height: 58px;
+  resize: vertical;
+}
+
 .table-card {
   padding-bottom: 14px;
 }
@@ -1965,6 +2092,8 @@ kbd {
   .settings-grid,
   .project-grid,
   .rag-stats,
+  .status-metric-grid,
+  .status-event-grid,
   .editor-preview-grid,
   .move-grid,
   .stats-ribbon,
@@ -1985,5 +2114,11 @@ kbd {
   .queue-head,
   .queue-row {
     min-width: 760px;
+  }
+
+  .queue-issue-list article,
+  .movement-log-list article,
+  .status-conflict-card {
+    grid-template-columns: 1fr;
   }
 }
