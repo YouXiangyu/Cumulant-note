@@ -409,6 +409,30 @@ export interface MoveLog extends CommandMeta {
   error?: string;
 }
 
+export interface AuditEvent extends CommandMeta {
+  id: number;
+  eventType: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface BatchOperationError {
+  id: number;
+  message: string;
+}
+
+export interface BatchQueueResult extends CommandMeta {
+  requested: number;
+  succeeded: QueueItem[];
+  failed: BatchOperationError[];
+}
+
+export interface BatchRollbackResult extends CommandMeta {
+  requested: number;
+  rolledBack: MoveLog[];
+  failed: BatchOperationError[];
+}
+
 export interface TodoScheduleCandidate extends CommandMeta {
   id: string;
   kind: "todo" | "schedule";
@@ -1012,6 +1036,47 @@ function normalizeMoveLog(raw: any): MoveLog {
   };
 }
 
+function normalizeAuditEvent(raw: any): AuditEvent {
+  if (!raw || typeof raw !== "object") {
+    return raw as AuditEvent;
+  }
+  const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+  return {
+    id: Number(raw.id),
+    eventType: raw.eventType ?? raw.event_type ?? "",
+    payload,
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
+  };
+}
+
+function normalizeBatchQueueResult(raw: any): BatchQueueResult {
+  return {
+    requested: Number(raw?.requested ?? 0),
+    succeeded: Array.isArray(raw?.succeeded) ? raw.succeeded.map(normalizeQueueItem) : [],
+    failed: Array.isArray(raw?.failed)
+      ? raw.failed.map((item: any) => ({ id: Number(item.id), message: String(item.message ?? "") }))
+      : [],
+    isFallback: raw?.isFallback,
+    fallbackReason: raw?.fallbackReason,
+  };
+}
+
+function normalizeBatchRollbackResult(raw: any): BatchRollbackResult {
+  return {
+    requested: Number(raw?.requested ?? 0),
+    rolledBack: Array.isArray(raw?.rolledBack ?? raw?.rolled_back)
+      ? (raw.rolledBack ?? raw.rolled_back).map(normalizeMoveLog)
+      : [],
+    failed: Array.isArray(raw?.failed)
+      ? raw.failed.map((item: any) => ({ id: Number(item.id), message: String(item.message ?? "") }))
+      : [],
+    isFallback: raw?.isFallback,
+    fallbackReason: raw?.fallbackReason,
+  };
+}
+
 function normalizeCandidate(raw: any): TodoScheduleCandidate {
   if (!raw || typeof raw !== "object" || "kind" in raw) {
     return raw as TodoScheduleCandidate;
@@ -1270,6 +1335,30 @@ export const commands = {
         fallbackReason,
       }),
     ).then(normalizeQueueItem),
+  retryQueueItems: (vaultPath: string, queueIds: number[]) =>
+    invokeWithFallback<any>(
+      "retry_queue_items",
+      { vaultPath, queueIds },
+      (reason) => ({
+        requested: queueIds.length,
+        succeeded: [],
+        failed: queueIds.map((id) => ({ id, message: reason })),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeBatchQueueResult),
+  skipQueueItems: (vaultPath: string, queueIds: number[], reason = "batch skipped from inbox recovery panel") =>
+    invokeWithFallback<any>(
+      "skip_queue_items",
+      { vaultPath, queueIds, reason },
+      (fallbackReason) => ({
+        requested: queueIds.length,
+        succeeded: [],
+        failed: queueIds.map((id) => ({ id, message: fallbackReason })),
+        isFallback: true,
+        fallbackReason,
+      }),
+    ).then(normalizeBatchQueueResult),
   getBudgetStatus: (vaultPath: string) =>
     invokeWithFallback<any>("get_budget_status", { vaultPath }, fallbackBudgetStatus).then(normalizeBudgetStatus),
   saveBudgetSettings: (vaultPath: string, settings: BudgetSettings) =>
@@ -1392,6 +1481,33 @@ export const commands = {
     invokeWithFallback<any[]>("list_move_logs", { vaultPath }, () => []).then((items) =>
       items.map(normalizeMoveLog),
     ),
+  rollbackMoves: (vaultPath: string, movementIds: number[]) =>
+    invokeWithFallback<any>(
+      "rollback_moves",
+      { vaultPath, movementIds },
+      (reason) => ({
+        requested: movementIds.length,
+        rolledBack: [],
+        failed: movementIds.map((id) => ({ id, message: reason })),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeBatchRollbackResult),
+  listAuditEvents: (vaultPath: string, limit = 30, eventType?: string) =>
+    invokeWithFallback<any[]>(
+      "list_audit_events",
+      { vaultPath, limit, eventType },
+      (reason) => [
+        {
+          id: 0,
+          eventType: "fallback",
+          payload: { message: reason },
+          createdAt: nowIso(),
+          isFallback: true,
+          fallbackReason: reason,
+        },
+      ],
+    ).then((items) => items.map(normalizeAuditEvent)),
   listTodoScheduleCandidates: (vaultPath: string) =>
     invokeWithFallback<any[]>(
       "list_todo_schedule_candidates",

@@ -2,7 +2,7 @@ use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
 use crate::services::archive_map::{ArchiveMapService, ArchiveMapSnapshot};
-use crate::services::audit::AuditService;
+use crate::services::audit::{AuditEvent, AuditService};
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
 use crate::services::conflict_rules::{
@@ -117,8 +117,50 @@ pub struct InboxPlanResult {
     pub budget: BudgetStatus,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOperationError {
+    pub id: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchQueueResult {
+    pub requested: usize,
+    pub succeeded: Vec<QueueItem>,
+    pub failed: Vec<BatchOperationError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRollbackResult {
+    pub requested: usize,
+    pub rolled_back: Vec<MoveLog>,
+    pub failed: Vec<BatchOperationError>,
+}
+
 fn into_command_result<T>(result: crate::services::ServiceResult<T>) -> Result<T, String> {
     result.map_err(|error| error.to_string())
+}
+
+fn sanitize_batch_ids(ids: Vec<i64>) -> Result<Vec<i64>, String> {
+    let mut cleaned = Vec::new();
+    for id in ids {
+        if id <= 0 {
+            return Err(format!("invalid batch id: {id}"));
+        }
+        if !cleaned.contains(&id) {
+            cleaned.push(id);
+        }
+    }
+    if cleaned.is_empty() {
+        return Err("batch ids must not be empty".to_string());
+    }
+    if cleaned.len() > 50 {
+        return Err("batch operations are limited to 50 items".to_string());
+    }
+    Ok(cleaned)
 }
 
 fn resolve_resident_worker_options(
@@ -577,6 +619,77 @@ pub fn skip_queue_item(
 }
 
 #[tauri::command]
+pub fn retry_queue_items(
+    vault_path: String,
+    queue_ids: Vec<i64>,
+) -> Result<BatchQueueResult, String> {
+    let ids = sanitize_batch_ids(queue_ids)?;
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        match QueueService::retry_item(&vault_path, *id) {
+            Ok(item) => succeeded.push(item),
+            Err(error) => failed.push(BatchOperationError {
+                id: *id,
+                message: error.to_string(),
+            }),
+        }
+    }
+    let result = BatchQueueResult {
+        requested: ids.len(),
+        succeeded,
+        failed,
+    };
+    let _ = AuditService::record(
+        &vault_path,
+        "queue_batch_retry",
+        json!({
+            "requested": result.requested,
+            "succeededIds": result.succeeded.iter().map(|item| item.id).collect::<Vec<_>>(),
+            "failed": &result.failed
+        }),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn skip_queue_items(
+    vault_path: String,
+    queue_ids: Vec<i64>,
+    reason: Option<String>,
+) -> Result<BatchQueueResult, String> {
+    let ids = sanitize_batch_ids(queue_ids)?;
+    let reason = reason.unwrap_or_else(|| "batch skipped from inbox recovery panel".to_string());
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        match QueueService::skip_item(&vault_path, *id, Some(&reason)) {
+            Ok(item) => succeeded.push(item),
+            Err(error) => failed.push(BatchOperationError {
+                id: *id,
+                message: error.to_string(),
+            }),
+        }
+    }
+    let result = BatchQueueResult {
+        requested: ids.len(),
+        succeeded,
+        failed,
+    };
+    let _ = AuditService::record(
+        &vault_path,
+        "queue_batch_skip",
+        json!({
+            "requested": result.requested,
+            "reason": reason,
+            "succeededIds": result.succeeded.iter().map(|item| item.id).collect::<Vec<_>>(),
+            "failed": &result.failed
+        }),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn start_inbox_watcher(
     vault_path: String,
     registry: tauri::State<'_, WatcherRegistry>,
@@ -802,6 +915,53 @@ pub fn rollback_move(
 #[tauri::command]
 pub fn list_move_logs(vault_path: String) -> Result<Vec<MoveLog>, String> {
     into_command_result(MovementService::list(&vault_path))
+}
+
+#[tauri::command]
+pub fn rollback_moves(
+    vault_path: String,
+    movement_ids: Vec<i64>,
+) -> Result<BatchRollbackResult, String> {
+    let ids = sanitize_batch_ids(movement_ids)?;
+    let mut rolled_back = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        match MovementService::rollback(&vault_path, *id) {
+            Ok(log) => rolled_back.push(log),
+            Err(error) => failed.push(BatchOperationError {
+                id: *id,
+                message: error.to_string(),
+            }),
+        }
+    }
+    let result = BatchRollbackResult {
+        requested: ids.len(),
+        rolled_back,
+        failed,
+    };
+    let _ = AuditService::record(
+        &vault_path,
+        "movement_batch_rollback",
+        json!({
+            "requested": result.requested,
+            "rolledBackIds": result.rolled_back.iter().map(|log| log.id).collect::<Vec<_>>(),
+            "failed": &result.failed
+        }),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn list_audit_events(
+    vault_path: String,
+    event_type: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<AuditEvent>, String> {
+    into_command_result(AuditService::list(
+        &vault_path,
+        event_type.as_deref(),
+        limit,
+    ))
 }
 
 #[tauri::command]
@@ -1071,5 +1231,13 @@ mod tests {
         assert_eq!(options.interval_ms, RESIDENT_WORKER_MIN_INTERVAL_MS);
         assert_eq!(options.max_items_per_tick, 1);
         assert_eq!(options.stable_wait_ms, RESIDENT_WORKER_MIN_STABLE_WAIT_MS);
+    }
+
+    #[test]
+    fn batch_ids_are_deduped_and_limited() {
+        assert_eq!(sanitize_batch_ids(vec![3, 3, 2]).unwrap(), vec![3, 2]);
+        assert!(sanitize_batch_ids(vec![]).is_err());
+        assert!(sanitize_batch_ids(vec![0]).is_err());
+        assert!(sanitize_batch_ids((1..=51).collect()).is_err());
     }
 }

@@ -62,6 +62,38 @@ impl AuditService {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list(
+        vault_path: &str,
+        event_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> ServiceResult<Vec<AuditEvent>> {
+        let connection = open_index_for_vault(vault_path)?;
+        let limit = limit.unwrap_or(50).clamp(1, 200) as i64;
+        match event_type.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(event_type) => {
+                let mut statement = connection.prepare(
+                    "SELECT id, event_type, payload_json, created_at
+                     FROM audit_events
+                     WHERE event_type = ?1
+                     ORDER BY id DESC
+                     LIMIT ?2",
+                )?;
+                let rows = statement.query_map(params![event_type, limit], row_to_audit_event)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            }
+            None => {
+                let mut statement = connection.prepare(
+                    "SELECT id, event_type, payload_json, created_at
+                     FROM audit_events
+                     ORDER BY id DESC
+                     LIMIT ?1",
+                )?;
+                let rows = statement.query_map(params![limit], row_to_audit_event)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            }
+        }
+    }
+
     pub fn latest_by_type(vault_path: &str, event_type: &str) -> ServiceResult<Option<AuditEvent>> {
         let connection = open_index_for_vault(vault_path)?;
         connection
@@ -113,5 +145,26 @@ mod tests {
             .unwrap();
         assert_eq!(latest.id, event.id);
         assert_eq!(latest.payload["relativePath"], "000-收集箱/a.md");
+    }
+
+    #[test]
+    fn audit_events_can_be_listed_recent_first_with_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        AuditService::record(temp.path().to_str().unwrap(), "first", json!({})).unwrap();
+        let second =
+            AuditService::record(temp.path().to_str().unwrap(), "second", json!({})).unwrap();
+        let third =
+            AuditService::record(temp.path().to_str().unwrap(), "second", json!({})).unwrap();
+
+        let recent = AuditService::list(temp.path().to_str().unwrap(), None, Some(2)).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id, third.id);
+        assert_eq!(recent[1].id, second.id);
+
+        let filtered =
+            AuditService::list(temp.path().to_str().unwrap(), Some("second"), Some(10)).unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|event| event.event_type == "second"));
     }
 }

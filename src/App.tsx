@@ -68,6 +68,7 @@ import {
   AiOrganizeResult,
   ArchiveMapSnapshot,
   AppSettings,
+  AuditEvent,
   BudgetStatus,
   commands,
   ConflictItem,
@@ -293,6 +294,7 @@ export default function App() {
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
   const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
@@ -364,6 +366,17 @@ export default function App() {
   );
 
   const recentMarkdown = useMemo(() => markdownFiles.slice(0, 5), [markdownFiles]);
+  const recoveryQueueItems = useMemo(
+    () => [
+      ...(queueStatus?.items?.failed ?? []),
+      ...(queueStatus?.items?.conflicts ?? []),
+    ],
+    [queueStatus],
+  );
+  const rollbackableMoveLogs = useMemo(
+    () => moveLogs.filter((log) => log.status === "moved").slice(0, 50),
+    [moveLogs],
+  );
 
   const relatedFiles = useMemo(() => {
     if (!relativePath) return recentMarkdown;
@@ -477,7 +490,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextMoveLogs, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -488,6 +501,7 @@ export default function App() {
         nextVaultPath ? commands.getArchiveMap(nextVaultPath) : Promise.resolve(null),
         commands.listConflicts(nextVaultPath),
         nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
+        nextVaultPath ? commands.listAuditEvents(nextVaultPath, 30) : Promise.resolve([]),
         commands.listTodoScheduleCandidates(nextVaultPath),
         commands.listStickyNotes(nextVaultPath),
         nextVaultPath ? commands.getMimoStatus(nextVaultPath) : Promise.resolve(null),
@@ -505,6 +519,7 @@ export default function App() {
     setArchiveMap(nextArchiveMap);
     setConflicts(nextConflicts);
     setMoveLogs(nextMoveLogs);
+    setAuditEvents(nextAuditEvents);
     setTodoCandidates(nextTodoCandidates);
     if (nextNotes.length > 0) {
       setStickyNotes(nextNotes);
@@ -783,6 +798,34 @@ export default function App() {
     await refreshOperations(vaultPath);
   }
 
+  async function retryVisibleQueueIssues() {
+    if (!vaultPath) return;
+    const ids = recoveryQueueItems.slice(0, 50).map((item) => item.id);
+    if (ids.length === 0) return;
+    const result = await run(
+      () => commands.retryQueueItems(vaultPath, ids),
+      "批量重试队列项",
+      "批量重试已完成",
+    );
+    if (!result) return;
+    setStatus(`批量重试完成：成功 ${result.succeeded.length}，失败 ${result.failed.length}`);
+    await refreshOperations(vaultPath);
+  }
+
+  async function skipVisibleQueueIssues() {
+    if (!vaultPath) return;
+    const ids = recoveryQueueItems.slice(0, 50).map((item) => item.id);
+    if (ids.length === 0) return;
+    const result = await run(
+      () => commands.skipQueueItems(vaultPath, ids, "batch skipped from inbox status panel"),
+      "批量跳过队列项",
+      "批量跳过已完成",
+    );
+    if (!result) return;
+    setStatus(`批量跳过完成：成功 ${result.succeeded.length}，失败 ${result.failed.length}`);
+    await refreshOperations(vaultPath);
+  }
+
   async function rollbackMoveLog(log: MoveLog) {
     if (!vaultPath) return;
     const result = await run(
@@ -791,6 +834,20 @@ export default function App() {
       "移动记录已回滚",
     );
     if (!result) return;
+    await refresh(vaultPath);
+  }
+
+  async function rollbackVisibleMoveLogs() {
+    if (!vaultPath) return;
+    const ids = rollbackableMoveLogs.map((log) => log.id);
+    if (ids.length === 0) return;
+    const result = await run(
+      () => commands.rollbackMoves(vaultPath, ids),
+      "批量回滚移动记录",
+      "批量回滚已完成",
+    );
+    if (!result) return;
+    setStatus(`批量回滚完成：成功 ${result.rolledBack.length}，失败 ${result.failed.length}`);
     await refresh(vaultPath);
   }
 
@@ -1123,11 +1180,22 @@ export default function App() {
     return String(message);
   }
 
+  function auditPayloadSummary(event: AuditEvent): string {
+    const payload = event.payload ?? {};
+    const parts = [
+      payload.sourceRelativePath,
+      payload.targetRelativePath ? `-> ${payload.targetRelativePath}` : undefined,
+      payload.status,
+      payload.reason,
+      payload.message,
+    ]
+      .filter(Boolean)
+      .map(String);
+    return parts.length > 0 ? parts.join(" · ") : "无详细摘要";
+  }
+
   function renderInboxStatusPanel() {
-    const issueItems = [
-      ...(queueStatus?.items?.failed ?? []),
-      ...(queueStatus?.items?.conflicts ?? []),
-    ].slice(0, 6);
+    const issueItems = recoveryQueueItems.slice(0, 6);
     const recentEvent =
       listenerStatus?.lastEvent ??
       queueStatus?.lastEvent ??
@@ -1193,6 +1261,16 @@ export default function App() {
             <small>{listenerStatus?.fallbackReason ?? queueStatus?.fallbackReason ?? "真实命令状态"}</small>
           </div>
         </div>
+        {recoveryQueueItems.length > 0 ? (
+          <div className="recovery-action-row">
+            <button type="button" className="secondary-button" onClick={retryVisibleQueueIssues} disabled={!vaultPath}>
+              批量重试当前问题
+            </button>
+            <button type="button" className="ghost-button" onClick={skipVisibleQueueIssues} disabled={!vaultPath}>
+              批量跳过当前问题
+            </button>
+          </div>
+        ) : null}
         {issueItems.length > 0 ? (
           <div className="queue-issue-list">
             {issueItems.map((item) => (
@@ -1262,7 +1340,17 @@ export default function App() {
             <RotateCcw size={18} aria-hidden="true" />
             Movement log
           </h3>
-          <span>{moveLogs.length} 条记录</span>
+          <div className="card-actions">
+            <span>{moveLogs.length} 条记录</span>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={rollbackVisibleMoveLogs}
+              disabled={!vaultPath || rollbackableMoveLogs.length === 0}
+            >
+              批量回滚可回滚项
+            </button>
+          </div>
         </div>
         {recentLogs.length > 0 ? (
           <div className="movement-log-list">
@@ -1289,6 +1377,36 @@ export default function App() {
           </div>
         ) : (
           <p className="empty-state">暂无移动记录</p>
+        )}
+      </section>
+    );
+  }
+
+  function renderAuditTimelinePanel() {
+    const recentEvents = auditEvents.slice(0, 12);
+    return (
+      <section className="concept-card audit-timeline-card">
+        <div className="card-heading">
+          <h3>
+            <Clock3 size={18} aria-hidden="true" />
+            Audit timeline
+          </h3>
+          <span>{auditEvents.length} 条最近事件</span>
+        </div>
+        {recentEvents.length > 0 ? (
+          <div className="audit-timeline-list">
+            {recentEvents.map((event) => (
+              <article key={event.id}>
+                <div>
+                  <strong>{event.eventType}</strong>
+                  <span>{auditPayloadSummary(event)}</span>
+                </div>
+                <small>{formatDate(event.createdAt)}</small>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">暂无 audit 事件</p>
         )}
       </section>
     );
@@ -2002,6 +2120,7 @@ export default function App() {
               ) : null}
             </section>
             {renderMovementLogPanel()}
+            {renderAuditTimelinePanel()}
           </div>
 
           <aside className="inbox-aside">

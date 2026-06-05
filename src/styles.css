@@ -194,6 +194,14 @@ textarea:focus {
   justify-content: space-between;
 }
 
+.card-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .nav-stack,
 .project-list,
 .conversation-list,
@@ -1052,7 +1060,8 @@ textarea:focus {
 }
 
 .queue-issue-list,
-.movement-log-list {
+.movement-log-list,
+.audit-timeline-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1060,6 +1069,7 @@ textarea:focus {
 
 .queue-issue-list article,
 .movement-log-list article,
+.audit-timeline-list article,
 .status-conflict-card {
   align-items: center;
   border: 1px solid var(--border);
@@ -1075,6 +1085,11 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.audit-timeline-list article {
+  background: var(--surface-soft);
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .status-conflict-card {
   background: var(--amber-soft);
   border-color: #ead2a9;
@@ -1083,6 +1098,7 @@ textarea:focus {
 
 .queue-issue-list article div,
 .movement-log-list article div,
+.audit-timeline-list article div,
 .status-conflict-card div {
   display: grid;
   gap: 3px;
@@ -1095,6 +1111,9 @@ textarea:focus {
 .movement-log-list strong,
 .movement-log-list span,
 .movement-log-list small,
+.audit-timeline-list strong,
+.audit-timeline-list span,
+.audit-timeline-list small,
 .status-conflict-card strong,
 .status-conflict-card span,
 .status-conflict-card small {
@@ -1108,6 +1127,8 @@ textarea:focus {
 .queue-issue-list small,
 .movement-log-list span,
 .movement-log-list small,
+.audit-timeline-list span,
+.audit-timeline-list small,
 .status-conflict-card span,
 .status-conflict-card small {
   color: var(--muted);
@@ -2239,6 +2260,7 @@ kbd {
 
   .queue-issue-list article,
   .movement-log-list article,
+  .audit-timeline-list article,
   .status-conflict-card {
     grid-template-columns: 1fr;
   }
