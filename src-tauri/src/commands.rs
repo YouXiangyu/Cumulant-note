@@ -7,7 +7,8 @@ use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
 use crate::services::conflict_rules::{
     ApplyConflictRuleResult, ConflictAnswerInput, ConflictAnswerResult, ConflictDetail,
-    ConflictRuleMatch, ConflictRuleService,
+    ConflictRule, ConflictRuleMatch, ConflictRuleService, ConflictRuleUpdateInput,
+    ConflictRuleUpdateResult, RenameSuggestion,
 };
 use crate::services::importer::{ImportService, InboxImportResult};
 use crate::services::inbox::{InboxItem, InboxService};
@@ -1095,6 +1096,51 @@ pub fn match_conflict_rules(
         target_relative_path,
         message,
     ))
+}
+
+#[tauri::command]
+pub fn suggest_conflict_rename_targets(
+    vault_path: String,
+    target_relative_path: String,
+    limit: Option<usize>,
+) -> Result<Vec<RenameSuggestion>, String> {
+    into_command_result(ConflictRuleService::suggest_rename_targets(
+        &vault_path,
+        target_relative_path,
+        limit,
+    ))
+}
+
+#[tauri::command]
+pub fn list_conflict_rules(
+    vault_path: String,
+    include_disabled: Option<bool>,
+) -> Result<Vec<ConflictRule>, String> {
+    into_command_result(ConflictRuleService::list_rules(
+        &vault_path,
+        include_disabled.unwrap_or(false),
+    ))
+}
+
+#[tauri::command]
+pub fn set_conflict_rule_status(
+    vault_path: String,
+    rule_id: i64,
+    status: String,
+) -> Result<ConflictRuleUpdateResult, String> {
+    into_command_result(ConflictRuleService::set_rule_status(
+        &vault_path,
+        rule_id,
+        status,
+    ))
+}
+
+#[tauri::command]
+pub fn update_conflict_rule(
+    vault_path: String,
+    input: ConflictRuleUpdateInput,
+) -> Result<ConflictRuleUpdateResult, String> {
+    into_command_result(ConflictRuleService::update_rule(&vault_path, input))
 }
 
 #[tauri::command]

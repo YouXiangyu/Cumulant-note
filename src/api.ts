@@ -455,6 +455,31 @@ export interface StickyNote extends CommandMeta {
 
 export type ConflictResolutionAction = "keep_existing" | "overwrite" | "rename" | "skip";
 
+export interface ConflictPreviewFile {
+  exists?: boolean;
+  sizeBytes?: number;
+  snippet?: string;
+  relativePath?: string;
+}
+
+export interface ConflictPreview {
+  sourceExists?: boolean;
+  targetExists?: boolean;
+  sourceSizeBytes?: number;
+  targetSizeBytes?: number;
+  sourceSnippet?: string;
+  targetSnippet?: string;
+  source?: ConflictPreviewFile;
+  target?: ConflictPreviewFile;
+  context?: string;
+}
+
+export interface ConflictRenameSuggestion {
+  targetRelativePath: string;
+  reason?: string;
+  available?: boolean;
+}
+
 export interface ConflictItem extends CommandMeta {
   id: string;
   kind: "target_exists" | "source_missing" | "locked" | "out_of_vault" | "unknown";
@@ -467,6 +492,9 @@ export interface ConflictItem extends CommandMeta {
   options: ConflictResolutionAction[];
   recommendedAction: ConflictResolutionAction;
   recommendations?: ConflictRuleMatch[];
+  preview?: ConflictPreview;
+  context?: ConflictPreview;
+  renameSuggestions?: ConflictRenameSuggestion[];
   payload?: Record<string, unknown>;
 }
 
@@ -486,10 +514,29 @@ export interface ConflictRule {
   hitCount: number;
 }
 
+export interface ConflictRuleUpdateInput {
+  ruleId: number;
+  status?: string;
+  answer?: string;
+  action?: ConflictResolutionAction;
+  targetPattern?: string;
+  autoApply?: boolean;
+  matchSummary?: string;
+}
+
+export interface ConflictRuleUpdateResult extends CommandMeta {
+  rule: ConflictRule;
+  auditId: number;
+  status: string;
+}
+
 export interface ConflictRuleMatch {
   rule: ConflictRule;
   score: number;
   reason: string;
+  status?: string;
+  autoApply?: boolean;
+  hitCount?: number;
 }
 
 export interface ConflictAnswerInput {
@@ -1103,21 +1150,67 @@ function normalizeConflict(raw: any): ConflictItem {
   const target = raw.targetRelativePath ?? payload.targetRelativePath ?? payload.relativePath ?? "";
   const rawRecommendations = raw.recommendations ?? payload.recommendedRules ?? [];
   const recommendations = Array.isArray(rawRecommendations) ? rawRecommendations : [];
+  const rawRenameSuggestions = raw.renameSuggestions ?? payload.renameSuggestions ?? payload.suggestedTargets ?? [];
+  const renameSuggestions = Array.isArray(rawRenameSuggestions)
+    ? rawRenameSuggestions
+        .map((item: any) =>
+          typeof item === "string"
+            ? { targetRelativePath: item }
+            : {
+                targetRelativePath: item?.targetRelativePath ?? item?.relativePath ?? item?.path ?? "",
+                reason: item?.reason,
+                available: item?.available ?? (item?.exists === undefined ? undefined : !item.exists),
+              },
+        )
+        .filter((item: ConflictRenameSuggestion) => item.targetRelativePath)
+    : [];
+  const preview = raw.preview ?? raw.context ?? payload.preview ?? payload.context;
   return {
     id: String(raw.id ?? raw.eventId ?? payload.id ?? Date.now()),
     eventId: raw.eventId ?? payload.eventId,
-    kind: "target_exists",
+    kind: raw.kind ?? payload.kind ?? "target_exists",
     createdAt: raw.createdAt,
     status: raw.status ?? payload.status ?? "open",
     sourceRelativePath: source,
     targetRelativePath: target,
     message: raw.message ?? payload.message ?? payload.error ?? payload.reason ?? "Conflict requires manual handling",
-    options: ["rename", "skip", "keep_existing"],
-    recommendedAction: "rename",
+    options: Array.isArray(raw.options ?? payload.options) ? raw.options ?? payload.options : ["rename", "skip", "keep_existing"],
+    recommendedAction: raw.recommendedAction ?? payload.recommendedAction ?? "rename",
     recommendations,
+    preview,
+    context: raw.context ?? payload.context,
+    renameSuggestions,
     payload,
     isFallback: raw.isFallback,
     fallbackReason: raw.fallbackReason,
+  };
+}
+
+function normalizeConflictRule(raw: any): ConflictRule {
+  return {
+    id: Number(raw?.id ?? 0),
+    ruleKey: raw?.ruleKey ?? raw?.rule_key ?? "",
+    sourcePattern: raw?.sourcePattern ?? raw?.source_pattern ?? "",
+    targetPattern: raw?.targetPattern ?? raw?.target_pattern ?? "",
+    answer: raw?.answer ?? "",
+    action: raw?.action ?? "rename",
+    autoApply: Boolean(raw?.autoApply ?? raw?.auto_apply),
+    matchSummary: raw?.matchSummary ?? raw?.match_summary ?? "",
+    markdownPath: raw?.markdownPath ?? raw?.markdown_path ?? "",
+    status: raw?.status ?? "active",
+    createdAt: raw?.createdAt ?? raw?.created_at ?? nowIso(),
+    updatedAt: raw?.updatedAt ?? raw?.updated_at ?? nowIso(),
+    hitCount: Number(raw?.hitCount ?? raw?.hit_count ?? 0),
+  };
+}
+
+function normalizeConflictRuleUpdate(raw: any): ConflictRuleUpdateResult {
+  return {
+    rule: normalizeConflictRule(raw?.rule ?? {}),
+    auditId: Number(raw?.auditId ?? raw?.audit_id ?? 0),
+    status: raw?.status ?? "updated",
+    isFallback: raw?.isFallback,
+    fallbackReason: raw?.fallbackReason,
   };
 }
 
@@ -1636,6 +1729,49 @@ export const commands = {
       { vaultPath, sourceRelativePath, targetRelativePath, message },
       () => [],
     ),
+  suggestConflictRenameTargets: (vaultPath: string, targetRelativePath: string, limit = 5) =>
+    invokeWithFallback<any[]>(
+      "suggest_conflict_rename_targets",
+      { vaultPath, targetRelativePath, limit },
+      () => [],
+    ).then((items) =>
+      items
+        .map((item) => ({
+          targetRelativePath: item?.targetRelativePath ?? item?.target_relative_path ?? "",
+          available: item?.available ?? (item?.exists === undefined ? undefined : !item.exists),
+        }))
+        .filter((item) => item.targetRelativePath),
+    ),
+  listConflictRules: (vaultPath: string, includeDisabled = true) =>
+    invokeWithFallback<any[]>(
+      "list_conflict_rules",
+      { vaultPath, includeDisabled },
+      () => [],
+    ).then((items) => items.map(normalizeConflictRule)),
+  setConflictRuleStatus: (vaultPath: string, ruleId: number, status: string) =>
+    invokeWithFallback<any>(
+      "set_conflict_rule_status",
+      { vaultPath, ruleId, status },
+      (reason) => ({
+        rule: { id: ruleId, status },
+        auditId: 0,
+        status: "fallback",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeConflictRuleUpdate),
+  updateConflictRule: (vaultPath: string, input: ConflictRuleUpdateInput) =>
+    invokeWithFallback<any>(
+      "update_conflict_rule",
+      { vaultPath, input },
+      (reason) => ({
+        rule: { id: input.ruleId, ...input },
+        auditId: 0,
+        status: "fallback",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeConflictRuleUpdate),
   applyConflictRule: (vaultPath: string, conflictId: string, ruleId: number) =>
     invokeWithFallback<ApplyConflictRuleResult>(
       "apply_conflict_rule",
@@ -1661,8 +1797,8 @@ export const commands = {
       (reason) => ({
         conflictId,
         action,
-        resolved: true,
-        message: "冲突命令尚未接入，已在前端移除提示。",
+        resolved: false,
+        message: "resolve_conflict command is not available; no file was changed and the conflict remains open.",
         isFallback: true,
         fallbackReason: reason,
       }),

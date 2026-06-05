@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 
 pub const RULES_DIR: &str = ".thebrain/rules";
 pub const INBOX_RULES_FILE: &str = ".thebrain/rules/inbox-organizing-rules.md";
@@ -41,6 +42,33 @@ pub struct ConflictRuleMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConflictFilePreview {
+    pub relative_path: String,
+    pub exists: bool,
+    pub size_bytes: Option<u64>,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictPreviewContext {
+    pub source_relative_path: Option<String>,
+    pub target_relative_path: Option<String>,
+    pub source_exists: bool,
+    pub target_exists: bool,
+    pub source: Option<ConflictFilePreview>,
+    pub target: Option<ConflictFilePreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameSuggestion {
+    pub target_relative_path: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictDetail {
     pub id: String,
     pub event_id: i64,
@@ -51,6 +79,8 @@ pub struct ConflictDetail {
     pub target_relative_path: Option<String>,
     pub message: Option<String>,
     pub payload: Value,
+    pub preview: Option<ConflictPreviewContext>,
+    pub rename_suggestions: Vec<RenameSuggestion>,
     pub recommendations: Vec<ConflictRuleMatch>,
 }
 
@@ -87,6 +117,26 @@ pub struct ApplyConflictRuleResult {
     pub audit_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictRuleUpdateInput {
+    pub rule_id: i64,
+    pub status: Option<String>,
+    pub answer: Option<String>,
+    pub action: Option<String>,
+    pub target_pattern: Option<String>,
+    pub auto_apply: Option<bool>,
+    pub match_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictRuleUpdateResult {
+    pub rule: ConflictRule,
+    pub audit_id: i64,
+    pub status: String,
+}
+
 pub struct ConflictRuleService;
 
 impl ConflictRuleService {
@@ -104,6 +154,7 @@ impl ConflictRuleService {
                 continue;
             }
             let mut detail = detail_from_event(event);
+            Self::attach_preview(vault_path, &mut detail)?;
             detail.recommendations =
                 Self::match_for_detail(vault_path, &detail, Some(detail.event_id))?;
             details.push(detail);
@@ -114,6 +165,7 @@ impl ConflictRuleService {
     pub fn get_conflict(vault_path: &str, conflict_id: &str) -> ServiceResult<ConflictDetail> {
         let event_id = parse_conflict_id(conflict_id)?;
         let mut detail = detail_from_event(AuditService::get(vault_path, event_id)?);
+        Self::attach_preview(vault_path, &mut detail)?;
         detail.recommendations = Self::match_for_detail(vault_path, &detail, Some(event_id))?;
         Ok(detail)
     }
@@ -214,9 +266,146 @@ impl ConflictRuleService {
             target_relative_path: Some(normalize_relative_path(&target_relative_path)?),
             message,
             payload: Value::Null,
+            preview: None,
+            rename_suggestions: Vec::new(),
             recommendations: Vec::new(),
         };
         Self::match_for_detail(vault_path, &detail, None)
+    }
+
+    pub fn suggest_rename_targets(
+        vault_path: &str,
+        target_relative_path: String,
+        limit: Option<usize>,
+    ) -> ServiceResult<Vec<RenameSuggestion>> {
+        let target = normalize_relative_path(&target_relative_path)?;
+        suggest_rename_targets(vault_path, &target, limit.unwrap_or(5).min(10))
+    }
+
+    pub fn list_rules(
+        vault_path: &str,
+        include_disabled: bool,
+    ) -> ServiceResult<Vec<ConflictRule>> {
+        let connection = open_index_for_vault(vault_path)?;
+        let sql = if include_disabled {
+            "SELECT id, rule_key, source_pattern, target_pattern, answer, action, auto_apply,
+                    match_summary, markdown_path, status, created_at, updated_at, hit_count
+             FROM conflict_rules
+             ORDER BY status ASC, hit_count DESC, id DESC"
+        } else {
+            "SELECT id, rule_key, source_pattern, target_pattern, answer, action, auto_apply,
+                    match_summary, markdown_path, status, created_at, updated_at, hit_count
+             FROM conflict_rules
+             WHERE status = 'active'
+             ORDER BY hit_count DESC, id DESC"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let rows = statement.query_map([], row_to_rule)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn set_rule_status(
+        vault_path: &str,
+        rule_id: i64,
+        status: String,
+    ) -> ServiceResult<ConflictRuleUpdateResult> {
+        Self::update_rule(
+            vault_path,
+            ConflictRuleUpdateInput {
+                rule_id,
+                status: Some(status),
+                answer: None,
+                action: None,
+                target_pattern: None,
+                auto_apply: None,
+                match_summary: None,
+            },
+        )
+    }
+
+    pub fn update_rule(
+        vault_path: &str,
+        input: ConflictRuleUpdateInput,
+    ) -> ServiceResult<ConflictRuleUpdateResult> {
+        let before = Self::get_rule_by_id(vault_path, input.rule_id)?;
+        let status = match input.status {
+            Some(status) => normalize_rule_status(&status)?,
+            None => before.status.clone(),
+        };
+        let answer = match input.answer {
+            Some(answer) => {
+                let answer = answer.trim().to_string();
+                if answer.is_empty() {
+                    return Err(ServiceError::InvalidState(
+                        "conflict rule answer cannot be empty".to_string(),
+                    ));
+                }
+                answer
+            }
+            None => before.answer.clone(),
+        };
+        let action = match input.action {
+            Some(action) => {
+                ensure_rule_action(&action)?;
+                action
+            }
+            None => before.action.clone(),
+        };
+        let target_pattern = match input.target_pattern {
+            Some(target) => normalize_relative_path(&target)?,
+            None => before.target_pattern.clone(),
+        };
+        let auto_apply = input.auto_apply.unwrap_or(before.auto_apply);
+        let match_summary = match input.match_summary {
+            Some(summary) => {
+                let summary = summary.trim().to_string();
+                if summary.is_empty() {
+                    return Err(ServiceError::InvalidState(
+                        "conflict rule match summary cannot be empty".to_string(),
+                    ));
+                }
+                summary
+            }
+            None => before.match_summary.clone(),
+        };
+        let now = Utc::now().to_rfc3339();
+        let connection = open_index_for_vault(vault_path)?;
+        connection.execute(
+            "UPDATE conflict_rules
+             SET status = ?1, answer = ?2, action = ?3, target_pattern = ?4,
+                 auto_apply = ?5, match_summary = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                status,
+                answer,
+                action,
+                target_pattern,
+                auto_apply as i64,
+                match_summary,
+                now,
+                before.id
+            ],
+        )?;
+        let rule = Self::get_rule_by_id(vault_path, before.id)?;
+        let audit = AuditService::record(
+            vault_path,
+            "conflict_rule_updated",
+            json!({
+                "ruleId": rule.id,
+                "beforeStatus": before.status,
+                "status": rule.status,
+                "action": rule.action,
+                "targetRelativePath": rule.target_pattern,
+                "autoApply": rule.auto_apply,
+                "matchSummary": rule.match_summary,
+                "markdownPath": rule.markdown_path
+            }),
+        )?;
+        Ok(ConflictRuleUpdateResult {
+            rule,
+            audit_id: audit.id,
+            status: "updated".to_string(),
+        })
     }
 
     pub fn apply_rule(
@@ -384,6 +573,22 @@ impl ConflictRuleService {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    fn attach_preview(vault_path: &str, detail: &mut ConflictDetail) -> ServiceResult<()> {
+        let preview = build_preview_context(
+            vault_path,
+            detail.source_relative_path.as_deref(),
+            detail.target_relative_path.as_deref(),
+        )?;
+        detail.rename_suggestions = detail
+            .target_relative_path
+            .as_deref()
+            .map(|target| suggest_rename_targets(vault_path, target, 5))
+            .transpose()?
+            .unwrap_or_default();
+        detail.preview = Some(preview);
+        Ok(())
+    }
+
     fn get_rule_by_id(vault_path: &str, rule_id: i64) -> ServiceResult<ConflictRule> {
         let connection = open_index_for_vault(vault_path)?;
         connection
@@ -495,8 +700,146 @@ fn detail_from_event(event: AuditEvent) -> ConflictDetail {
         target_relative_path: target,
         message,
         payload: event.payload,
+        preview: None,
+        rename_suggestions: Vec::new(),
         recommendations: Vec::new(),
     }
+}
+
+fn build_preview_context(
+    vault_path: &str,
+    source: Option<&str>,
+    target: Option<&str>,
+) -> ServiceResult<ConflictPreviewContext> {
+    let source_preview = source
+        .map(|path| build_file_preview(vault_path, path))
+        .transpose()?;
+    let target_preview = target
+        .map(|path| build_file_preview(vault_path, path))
+        .transpose()?;
+    Ok(ConflictPreviewContext {
+        source_relative_path: source_preview
+            .as_ref()
+            .map(|preview| preview.relative_path.clone()),
+        target_relative_path: target_preview
+            .as_ref()
+            .map(|preview| preview.relative_path.clone()),
+        source_exists: source_preview
+            .as_ref()
+            .map(|preview| preview.exists)
+            .unwrap_or(false),
+        target_exists: target_preview
+            .as_ref()
+            .map(|preview| preview.exists)
+            .unwrap_or(false),
+        source: source_preview,
+        target: target_preview,
+    })
+}
+
+fn build_file_preview(vault_path: &str, relative_path: &str) -> ServiceResult<ConflictFilePreview> {
+    let root = canonical_vault_root(vault_path)?;
+    let normalized = normalize_relative_path(relative_path)?;
+    let path = root.join(&normalized);
+    if !path.exists() {
+        return Ok(ConflictFilePreview {
+            relative_path: normalized,
+            exists: false,
+            size_bytes: None,
+            snippet: None,
+        });
+    }
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(&root) {
+        return Err(ServiceError::EscapedVault(
+            canonical.to_string_lossy().to_string(),
+        ));
+    }
+    let metadata = fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Ok(ConflictFilePreview {
+            relative_path: normalized,
+            exists: true,
+            size_bytes: None,
+            snippet: None,
+        });
+    }
+    let snippet = if is_preview_text_path(&normalized) && metadata.len() <= 1_000_000 {
+        fs::read_to_string(&canonical)
+            .ok()
+            .map(|body| body.chars().take(1200).collect())
+    } else {
+        None
+    };
+    Ok(ConflictFilePreview {
+        relative_path: normalized,
+        exists: true,
+        size_bytes: Some(metadata.len()),
+        snippet,
+    })
+}
+
+fn suggest_rename_targets(
+    vault_path: &str,
+    target_relative_path: &str,
+    limit: usize,
+) -> ServiceResult<Vec<RenameSuggestion>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let root = canonical_vault_root(vault_path)?;
+    let target = normalize_relative_path(target_relative_path)?;
+    let target_path = Path::new(&target);
+    let parent = target_path.parent().and_then(Path::to_str).unwrap_or("");
+    let stem = target_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| ServiceError::InvalidRelativePath(target.clone()))?;
+    let extension = target_path.extension().and_then(|value| value.to_str());
+    let mut suggestions = Vec::new();
+    let mut suffix = 1;
+    while suggestions.len() < limit && suffix <= 100 {
+        let file_name = match extension {
+            Some(extension) if !extension.is_empty() => format!("{stem}-{suffix}.{extension}"),
+            _ => format!("{stem}-{suffix}"),
+        };
+        let candidate = if parent.is_empty() {
+            file_name
+        } else {
+            format!("{parent}/{file_name}")
+        };
+        let normalized = normalize_relative_path(&candidate)?;
+        let full_path = root.join(&normalized);
+        if let Some(parent) = full_path.parent() {
+            if parent.exists() {
+                let canonical_parent = parent.canonicalize()?;
+                if !canonical_parent.starts_with(&root) {
+                    return Err(ServiceError::EscapedVault(
+                        canonical_parent.to_string_lossy().to_string(),
+                    ));
+                }
+            }
+        }
+        if !full_path.exists() {
+            suggestions.push(RenameSuggestion {
+                target_relative_path: normalized,
+                exists: false,
+            });
+        }
+        suffix += 1;
+    }
+    Ok(suggestions)
+}
+
+fn is_preview_text_path(relative_path: &str) -> bool {
+    matches!(
+        Path::new(relative_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("md" | "markdown" | "txt")
+    )
 }
 
 fn value_string(payload: &Value, keys: &[&str]) -> Option<String> {
@@ -522,6 +865,15 @@ fn ensure_rule_action(action: &str) -> ServiceResult<()> {
         "rename" | "skip" | "keep_existing" => Ok(()),
         other => Err(ServiceError::InvalidState(format!(
             "unsupported conflict rule action: {other}"
+        ))),
+    }
+}
+
+fn normalize_rule_status(status: &str) -> ServiceResult<String> {
+    match status {
+        "active" | "disabled" => Ok(status.to_string()),
+        other => Err(ServiceError::InvalidState(format!(
+            "unsupported conflict rule status: {other}"
         ))),
     }
 }
@@ -675,6 +1027,140 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert!(matches[0].score >= 0.25);
+    }
+
+    #[test]
+    fn rename_suggestions_are_preview_only_and_skip_existing_names() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        fs::write(temp.path().join("100-School").join("a.md"), "existing").unwrap();
+        fs::write(
+            temp.path().join("100-School").join("a-1.md"),
+            "existing suffix",
+        )
+        .unwrap();
+        fs::write(temp.path().join(INBOX_DIR).join("a.md"), "source").unwrap();
+
+        let suggestions = ConflictRuleService::suggest_rename_targets(
+            temp.path().to_str().unwrap(),
+            "100-School/a.md".to_string(),
+            Some(3),
+        )
+        .unwrap();
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|item| item.target_relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "100-School/a-2.md",
+                "100-School/a-3.md",
+                "100-School/a-4.md"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join(INBOX_DIR).join("a.md")).unwrap(),
+            "source"
+        );
+        assert!(!temp.path().join("100-School").join("a-2.md").exists());
+    }
+
+    #[test]
+    fn disabled_rules_are_excluded_from_recommendations() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let event = AuditService::record(
+            temp.path().to_str().unwrap(),
+            "conflict",
+            json!({
+                "sourceRelativePath": format!("{INBOX_DIR}/a.md"),
+                "targetRelativePath": "100-School/a.md",
+                "message": "target already exists"
+            }),
+        )
+        .unwrap();
+        let created = ConflictRuleService::submit_answer(
+            temp.path().to_str().unwrap(),
+            ConflictAnswerInput {
+                conflict_id: event.id.to_string(),
+                answer: "Use date suffix for school notes.".to_string(),
+                action: Some("rename".to_string()),
+                target_relative_path: None,
+                auto_apply: Some(false),
+                match_summary: None,
+            },
+        )
+        .unwrap();
+
+        let updated = ConflictRuleService::set_rule_status(
+            temp.path().to_str().unwrap(),
+            created.rule.id,
+            "disabled".to_string(),
+        )
+        .unwrap();
+        assert_eq!(updated.rule.status, "disabled");
+
+        let matches = ConflictRuleService::match_rules(
+            temp.path().to_str().unwrap(),
+            format!("{INBOX_DIR}/b.md"),
+            "100-School/b.md".to_string(),
+            Some("target already exists".to_string()),
+        )
+        .unwrap();
+        assert!(matches.is_empty());
+        assert!(
+            ConflictRuleService::list_rules(temp.path().to_str().unwrap(), false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            ConflictRuleService::list_rules(temp.path().to_str().unwrap(), true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflict_detail_preview_reads_bounded_text_context() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        let source_body = "s".repeat(1500);
+        fs::write(temp.path().join(INBOX_DIR).join("a.md"), &source_body).unwrap();
+        fs::write(temp.path().join("100-School").join("a.md"), "target text").unwrap();
+        let event = AuditService::record(
+            temp.path().to_str().unwrap(),
+            "conflict",
+            json!({
+                "sourceRelativePath": format!("{INBOX_DIR}/a.md"),
+                "targetRelativePath": "100-School/a.md",
+                "message": "target already exists"
+            }),
+        )
+        .unwrap();
+
+        let detail =
+            ConflictRuleService::get_conflict(temp.path().to_str().unwrap(), &event.id.to_string())
+                .unwrap();
+        let preview = detail.preview.unwrap();
+
+        assert!(preview.source_exists);
+        assert!(preview.target_exists);
+        assert_eq!(
+            preview.source.unwrap().snippet.unwrap().chars().count(),
+            1200
+        );
+        assert_eq!(
+            preview.target.unwrap().snippet.unwrap(),
+            "target text".to_string()
+        );
+        assert_eq!(
+            detail.rename_suggestions[0].target_relative_path,
+            "100-School/a-1.md"
+        );
     }
 
     #[test]

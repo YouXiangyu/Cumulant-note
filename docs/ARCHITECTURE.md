@@ -78,10 +78,10 @@ AI 整理决策必须优先选择 Archive Map 中已有目录。只有当已有�
 冲突处理：
 
 - 命名冲突、目标路径冲突、分类概念冲突和低置信度整理结果不能静默处理。
-- 当前第一版进入可见 conflict 状态，前端在收集箱侧栏展示冲突来源、目标、原因、用户答案输入和相似规则推荐。
-- 用户回答会沉淀为本地规则。规则正文保存到可读 Markdown：`.thebrain/rules/inbox-organizing-rules.md`；`.thebrain/index.sqlite` 保存 `conflict_rules`、`conflict_rule_hits`、审计事件和应用状态索引。
+- 当前第一版进入可见 conflict 状态，前端在收集箱侧栏展示冲突来源、目标、原因、只读源/目标预览、重命名建议、用户答案输入和相似规则推荐。
+- 用户回答会沉淀为本地规则。规则正文保存到可读 Markdown：`.thebrain/rules/inbox-organizing-rules.md`；`.thebrain/index.sqlite` 保存 `conflict_rules`、`conflict_rule_hits`、审计事件和应用状态索引。规则启用/禁用和字段编辑当前只更新 SQLite 与 audit，Markdown 规则文件保持 append-only。
 - 规则文件属于系统辅助文件，不能被收集箱 watcher 当作普通待整理文件反复处理，也不能被 RAG 当作用户内容索引。
-- 第一版只做推荐和用户确认应用；不静默覆盖、删除或批量自动应用规则。
+- 第一版只做只读预览、推荐和用户确认应用；不静默覆盖、删除或批量自动应用规则。
 
 后台 worker 与 MiMo 的关系：
 
@@ -90,9 +90,9 @@ AI 整理决策必须优先选择 Archive Map 中已有目录。只有当已有�
 - 后台 worker 是本地调度器，负责消费队列、稳定等待、调用 MiMo、检查预算、执行移动、写日志、处理重试和回滚。
 - 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径，支持 listener 和导入产生的队列项；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态，并尝试附带相似冲突规则推荐。
 - 当前 `commands.rs` 提供应用内 resident worker 第一版：用户可手动启动/停止一个 5 秒 tick 的常驻循环；它复用 `WorkerService::drain`，单并发、每 tick 最多处理 1 条队列项，不是系统服务，也不会随应用启动自动运行。
-- 当前收集箱状态面板第一版汇总 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 状态，展示最近事件、最近错误；主操作区提供导入、递归扫描入队、重建归档地图、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项或批量重试/跳过、冲突规则处理和 movement log 单项或批量回滚。
+- 当前收集箱状态面板第一版汇总 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 状态，展示最近事件、最近错误；主操作区提供导入、递归扫描入队、重建归档地图、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项或批量重试/跳过、冲突详情预览、动作选择、规则编辑/禁用和 movement log 单项或批量回滚。
 - 批量恢复命令只循环调用现有单项安全服务：队列批量重试/跳过复用 `QueueService::retry_item` / `skip_item`，movement log 批量回滚复用 `MovementService::rollback`，因此仍遵守状态校验、Vault 路径限制和不覆盖已有文件规则。批量命令会写入 audit 事件，并返回单项成功/失败结果。
-- 只有 MiMo provider、listener、Archive Map、冲突规则服务、resident worker、批量恢复或状态面板不等于已经有完整后台自动整理；长期可信自动整理仍需要长时间实机监听验证、系统/托盘生命周期策略、更完整批量策略、规则编辑/禁用、差异预览和批量恢复确认动作。
+- 只有 MiMo provider、listener、Archive Map、冲突规则服务、resident worker、批量恢复或状态面板不等于已经有完整后台自动整理；长期可信自动整理仍需要长时间实机监听验证、系统/托盘生命周期策略、更完整批量策略、真正 diff 视图、强确认移动动作和批量恢复确认动作。
 
 ## 4. Markdown 与元数据
 
@@ -189,7 +189,7 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 - `movement.rs`：文件移动、空目录清理、ledger、audit、回滚。
 - `archive_map.rs`：扫描正式 Vault 目录结构，生成 `.thebrain/rules/archive-map.md` 和 SQLite 缓存，供整理计划和 worker 共享。
 - `audit.rs`：审计事件写入、最近事件列表和按类型查询。
-- `conflict_rules.rs`：冲突详情、用户答案规则 Markdown、规则索引、命中记录、相似规则推荐和确认应用。
+- `conflict_rules.rs`：冲突详情、bounded preview、只读重命名建议、用户答案规则 Markdown、规则索引、启用/禁用/编辑、命中记录、相似规则推荐和确认应用。
 - `queue.rs`：队列状态、claim/retry、失败/冲突单项恢复和 listener 状态持久化。
 - `rag.rs`：RAG 索引和问答编排。
 - `retrieval.rs`：检索通道和评分。

@@ -73,6 +73,7 @@ import {
   commands,
   ConflictItem,
   ConflictResolutionAction,
+  ConflictRule,
   defaultAppSettings,
   InboxListenerStatus,
   InboxItem,
@@ -227,6 +228,18 @@ function actionLabel(action: ConflictResolutionAction): string {
   return labels[action];
 }
 
+function safeConflictActions(conflict: ConflictItem): ConflictResolutionAction[] {
+  const fallbackOptions: ConflictResolutionAction[] = ["rename", "skip", "keep_existing"];
+  const options = conflict.options?.length ? conflict.options : fallbackOptions;
+  return options.filter((action) => action !== "overwrite");
+}
+
+function boundedSnippet(value?: string): string {
+  if (!value) return "";
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 220)}...` : normalized;
+}
+
 function queueStateLabel(state?: QueueStatus["state"]): string {
   const labels: Record<QueueStatus["state"], string> = {
     idle: "空闲",
@@ -293,6 +306,10 @@ export default function App() {
   const [archiveMap, setArchiveMap] = useState<ArchiveMapSnapshot | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
+  const [conflictActions, setConflictActions] = useState<Record<string, ConflictResolutionAction>>({});
+  const [conflictTargets, setConflictTargets] = useState<Record<string, string>>({});
+  const [conflictRules, setConflictRules] = useState<ConflictRule[]>([]);
+  const [conflictRuleDrafts, setConflictRuleDrafts] = useState<Record<number, Partial<ConflictRule>>>({});
   const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
@@ -490,7 +507,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -500,6 +517,7 @@ export default function App() {
         commands.getBudgetStatus(nextVaultPath),
         nextVaultPath ? commands.getArchiveMap(nextVaultPath) : Promise.resolve(null),
         commands.listConflicts(nextVaultPath),
+        nextVaultPath ? commands.listConflictRules(nextVaultPath, true) : Promise.resolve([]),
         nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
         nextVaultPath ? commands.listAuditEvents(nextVaultPath, 30) : Promise.resolve([]),
         commands.listTodoScheduleCandidates(nextVaultPath),
@@ -518,6 +536,7 @@ export default function App() {
     setBudgetStatus(nextBudget);
     setArchiveMap(nextArchiveMap);
     setConflicts(nextConflicts);
+    setConflictRules(nextConflictRules);
     setMoveLogs(nextMoveLogs);
     setAuditEvents(nextAuditEvents);
     setTodoCandidates(nextTodoCandidates);
@@ -1092,6 +1111,130 @@ export default function App() {
     setDirtyNoteId((current) => (current === activeNote.id ? null : current));
   }
 
+  function selectedConflictAction(conflict: ConflictItem): ConflictResolutionAction {
+    const actions = safeConflictActions(conflict);
+    const stored = conflictActions[conflict.id];
+    if (stored && actions.includes(stored)) return stored;
+    if (conflict.recommendedAction !== "overwrite" && actions.includes(conflict.recommendedAction)) {
+      return conflict.recommendedAction;
+    }
+    return actions.includes("rename") ? "rename" : actions[0] ?? "skip";
+  }
+
+  function selectedConflictTarget(conflict: ConflictItem): string {
+    return conflictTargets[conflict.id] ?? conflict.renameSuggestions?.[0]?.targetRelativePath ?? conflict.targetRelativePath ?? "";
+  }
+
+  function conflictRuleDraft(rule: ConflictRule): ConflictRule {
+    return {
+      ...rule,
+      ...conflictRuleDrafts[rule.id],
+    };
+  }
+
+  function updateConflictRuleDraft(ruleId: number, patch: Partial<ConflictRule>) {
+    setConflictRuleDrafts((drafts) => ({
+      ...drafts,
+      [ruleId]: {
+        ...drafts[ruleId],
+        ...patch,
+      },
+    }));
+  }
+
+  function renderConflictDetails(conflict: ConflictItem) {
+    const recommendation = conflict.recommendations?.[0];
+    const rule = recommendation?.rule;
+    const preview = conflict.preview ?? conflict.context;
+    const sourceExists = preview?.sourceExists ?? preview?.source?.exists;
+    const targetExists = preview?.targetExists ?? preview?.target?.exists;
+    const sourceSize = preview?.sourceSizeBytes ?? preview?.source?.sizeBytes;
+    const targetSize = preview?.targetSizeBytes ?? preview?.target?.sizeBytes;
+    const sourceSnippet = boundedSnippet(preview?.sourceSnippet ?? preview?.source?.snippet);
+    const targetSnippet = boundedSnippet(preview?.targetSnippet ?? preview?.target?.snippet);
+    const context = boundedSnippet(preview?.context);
+    return (
+      <>
+        {rule ? (
+          <div className="conflict-recommendation-detail">
+            <small>Recommendation: {actionLabel(rule.action)} / {rule.answer || "no answer"} / {Math.round((recommendation?.score ?? 0) * 100)}%</small>
+            <small>{recommendation?.reason || rule.matchSummary || "No match reason"} / hits {recommendation?.hitCount ?? rule.hitCount ?? 0} / {recommendation?.autoApply ?? rule.autoApply ? "autoApply on" : "autoApply off"} / {recommendation?.status ?? rule.status ?? "open"}</small>
+          </div>
+        ) : (
+          <small>No matching rule yet. Record one after choosing an action.</small>
+        )}
+        {preview ? (
+          <div className="conflict-preview">
+            <small>Preview: source {sourceExists === undefined ? "unknown" : sourceExists ? "exists" : "missing"} / {formatBytes(sourceSize)}; target {targetExists === undefined ? "unknown" : targetExists ? "exists" : "missing"} / {formatBytes(targetSize)}</small>
+            {sourceSnippet ? <code>Source: {sourceSnippet}</code> : null}
+            {targetSnippet ? <code>Target: {targetSnippet}</code> : null}
+            {context ? <code>Context: {context}</code> : null}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderConflictControls(conflict: ConflictItem) {
+    const action = selectedConflictAction(conflict);
+    const target = selectedConflictTarget(conflict);
+    return (
+      <>
+        <div className="conflict-action-row">
+          <select
+            aria-label="Conflict action"
+            value={action}
+            onChange={(event) =>
+              setConflictActions((actions) => ({
+                ...actions,
+                [conflict.id]: event.target.value as ConflictResolutionAction,
+              }))
+            }
+          >
+            {safeConflictActions(conflict).map((option) => (
+              <option value={option} key={option}>{actionLabel(option)}</option>
+            ))}
+          </select>
+          <small>Selected: {actionLabel(action)}</small>
+        </div>
+        {action === "rename" ? (
+          <div className="conflict-target-box">
+            <input
+              aria-label="Rename target"
+              value={target}
+              onChange={(event) =>
+                setConflictTargets((targets) => ({
+                  ...targets,
+                  [conflict.id]: event.target.value,
+                }))
+              }
+              placeholder={conflict.targetRelativePath || "target-relative-path.md"}
+            />
+            {conflict.renameSuggestions?.length ? (
+              <div className="conflict-suggestion-row">
+                {conflict.renameSuggestions.slice(0, 3).map((suggestion) => (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    key={suggestion.targetRelativePath}
+                    onClick={() =>
+                      setConflictTargets((targets) => ({
+                        ...targets,
+                        [conflict.id]: suggestion.targetRelativePath,
+                      }))
+                    }
+                  >
+                    {suggestion.targetRelativePath}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
   async function resolveConflict(conflict: ConflictItem, action: ConflictResolutionAction) {
     const result = await run(
       () => commands.resolveConflict(vaultPath, conflict.id, action),
@@ -1106,6 +1249,8 @@ export default function App() {
 
   async function recordConflictRule(conflict: ConflictItem) {
     const answer = (conflictAnswers[conflict.id] ?? "").trim();
+    const action = selectedConflictAction(conflict);
+    const targetRelativePath = action === "rename" ? selectedConflictTarget(conflict).trim() : conflict.targetRelativePath;
     if (!answer) {
       setAppError({
         title: "规则答案为空",
@@ -1114,20 +1259,28 @@ export default function App() {
       });
       return;
     }
+    if (action === "rename" && !targetRelativePath) {
+      setAppError({
+        title: "Rename target is empty",
+        detail: "Choose a suggested target or type a Vault-relative target path first.",
+        recovery: "The frontend will not auto-apply a rename without an explicit target.",
+      });
+      return;
+    }
     const result = await run(
       () =>
         commands.submitConflictAnswer(vaultPath, {
           conflictId: conflict.id,
           answer,
-          action: "rename",
-          targetRelativePath: conflict.targetRelativePath,
+          action,
+          targetRelativePath,
           autoApply: false,
-          matchSummary: `same target folder as ${conflict.targetRelativePath}`,
+          matchSummary: `${action} for ${conflict.targetRelativePath || conflict.sourceRelativePath}`,
         }),
       "记录冲突规则",
       "冲突规则已记录",
     );
-    if (!result) return;
+    if (!result || result.isFallback) return;
     setConflictAnswers((answers) => ({ ...answers, [conflict.id]: "" }));
     await refreshOperations(vaultPath);
   }
@@ -1138,7 +1291,44 @@ export default function App() {
       "应用冲突规则",
       "冲突规则已确认",
     );
-    if (!result) return;
+    if (!result || result.isFallback) return;
+    await refreshOperations(vaultPath);
+  }
+
+  async function toggleConflictRule(rule: ConflictRule) {
+    if (!vaultPath) return;
+    const nextStatus = rule.status === "active" ? "disabled" : "active";
+    const result = await run(
+      () => commands.setConflictRuleStatus(vaultPath, rule.id, nextStatus),
+      nextStatus === "active" ? "启用冲突规则" : "禁用冲突规则",
+      nextStatus === "active" ? "规则已启用" : "规则已禁用",
+    );
+    if (!result || result.isFallback) return;
+    await refreshOperations(vaultPath);
+  }
+
+  async function saveConflictRuleEdit(rule: ConflictRule) {
+    if (!vaultPath) return;
+    const draft = conflictRuleDraft(rule);
+    const result = await run(
+      () =>
+        commands.updateConflictRule(vaultPath, {
+          ruleId: rule.id,
+          answer: draft.answer,
+          action: draft.action,
+          targetPattern: draft.targetPattern,
+          autoApply: draft.autoApply,
+          matchSummary: draft.matchSummary,
+        }),
+      "保存冲突规则",
+      "冲突规则已保存",
+    );
+    if (!result || result.isFallback) return;
+    setConflictRuleDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[rule.id];
+      return next;
+    });
     await refreshOperations(vaultPath);
   }
 
@@ -1298,6 +1488,8 @@ export default function App() {
               <span>待处理冲突</span>
               <strong>{featuredConflict.sourceRelativePath || "unknown source"}</strong>
               <small>{featuredConflict.message} · 目标 {featuredConflict.targetRelativePath || "未给出"}</small>
+              {renderConflictDetails(featuredConflict)}
+              {renderConflictControls(featuredConflict)}
               <textarea
                 aria-label="状态面板冲突规则答案"
                 value={conflictAnswers[featuredConflict.id] ?? ""}
@@ -1322,8 +1514,8 @@ export default function App() {
             <button type="button" className="secondary-button" onClick={() => recordConflictRule(featuredConflict)}>
               记录规则
             </button>
-            <button type="button" className="ghost-button" onClick={() => resolveConflict(featuredConflict, "skip")}>
-              跳过冲突
+            <button type="button" className="ghost-button" onClick={() => resolveConflict(featuredConflict, selectedConflictAction(featuredConflict))}>
+              {selectedConflictAction(featuredConflict) === "skip" ? "跳过冲突" : "提交选择"}
             </button>
           </div>
         ) : null}
@@ -1407,6 +1599,79 @@ export default function App() {
           </div>
         ) : (
           <p className="empty-state">暂无 audit 事件</p>
+        )}
+      </section>
+    );
+  }
+
+  function renderConflictRulePanel() {
+    const recentRules = conflictRules.slice(0, 4);
+    return (
+      <section className="concept-card conflict-rule-panel">
+        <div className="card-heading">
+          <h3>冲突规则记忆</h3>
+          <span>{conflictRules.length}</span>
+        </div>
+        {recentRules.length > 0 ? (
+          <div className="conflict-rule-list">
+            {recentRules.map((rule) => {
+              const draft = conflictRuleDraft(rule);
+              return (
+                <article key={rule.id} className={rule.status === "active" ? undefined : "is-disabled"}>
+                  <div>
+                    <strong>#{rule.id} {rule.status}</strong>
+                    <span>{rule.sourcePattern}</span>
+                    <small>hits {rule.hitCount} · {formatDate(rule.updatedAt)}</small>
+                  </div>
+                  <label>
+                    <span>动作</span>
+                    <select
+                      value={draft.action}
+                      onChange={(event) =>
+                        updateConflictRuleDraft(rule.id, { action: event.target.value as ConflictResolutionAction })
+                      }
+                    >
+                      {(["rename", "skip", "keep_existing"] as ConflictResolutionAction[]).map((action) => (
+                        <option value={action} key={action}>{actionLabel(action)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>目标</span>
+                    <input
+                      value={draft.targetPattern}
+                      onChange={(event) => updateConflictRuleDraft(rule.id, { targetPattern: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>答案</span>
+                    <textarea
+                      value={draft.answer}
+                      onChange={(event) => updateConflictRuleDraft(rule.id, { answer: event.target.value })}
+                      rows={2}
+                    />
+                  </label>
+                  <label>
+                    <span>匹配说明</span>
+                    <input
+                      value={draft.matchSummary}
+                      onChange={(event) => updateConflictRuleDraft(rule.id, { matchSummary: event.target.value })}
+                    />
+                  </label>
+                  <div className="recovery-action-row">
+                    <button type="button" className="secondary-button" onClick={() => saveConflictRuleEdit(rule)}>
+                      保存修改
+                    </button>
+                    <button type="button" className="ghost-button" onClick={() => toggleConflictRule(rule)}>
+                      {rule.status === "active" ? "禁用" : "启用"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="empty-state">暂无冲突规则</p>
         )}
       </section>
     );
@@ -2197,13 +2462,8 @@ export default function App() {
                     <strong>{conflict.sourceRelativePath || "unknown source"}</strong>
                     <span>{conflict.message}</span>
                     <small>目标：{conflict.targetRelativePath || "未给出"}</small>
-                    {conflict.recommendations?.length ? (
-                      <small>
-                        推荐规则：{conflict.recommendations[0].rule.answer}（{Math.round(conflict.recommendations[0].score * 100)}%）
-                      </small>
-                    ) : (
-                      <small>暂无相似规则，等待你记录处理方式</small>
-                    )}
+                    {renderConflictDetails(conflict)}
+                    {renderConflictControls(conflict)}
                     <textarea
                       aria-label="冲突规则答案"
                       value={conflictAnswers[conflict.id] ?? ""}
@@ -2228,13 +2488,15 @@ export default function App() {
                   <button type="button" className="secondary-button" onClick={() => recordConflictRule(conflict)}>
                     记录规则
                   </button>
-                  <button type="button" className="ghost-button" onClick={() => resolveConflict(conflict, "skip")}>
-                    跳过
+                  <button type="button" className="ghost-button" onClick={() => resolveConflict(conflict, selectedConflictAction(conflict))}>
+                    {selectedConflictAction(conflict) === "skip" ? "跳过" : "提交选择"}
                   </button>
                 </article>
               ))}
               {conflicts.length === 0 ? <p className="empty-state">暂无待处理冲突</p> : null}
             </section>
+
+            {renderConflictRulePanel()}
 
             <section className="concept-card">
               <div className="card-heading">

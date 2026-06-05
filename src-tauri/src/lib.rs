@@ -80,6 +80,10 @@ pub fn run() {
             commands::get_conflict_detail,
             commands::submit_conflict_answer,
             commands::match_conflict_rules,
+            commands::suggest_conflict_rename_targets,
+            commands::list_conflict_rules,
+            commands::set_conflict_rule_status,
+            commands::update_conflict_rule,
             commands::apply_conflict_rule,
             commands::resolve_conflict
         ])
