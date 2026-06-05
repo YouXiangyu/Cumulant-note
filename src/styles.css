@@ -2319,6 +2319,22 @@ kbd {
   padding: 8px 2px;
 }
 
+.insights-note {
+  background: var(--amber-soft);
+  border: 1px solid #ead2a9;
+  border-radius: 8px;
+  color: #7a4a17;
+  font-size: 12px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.insights-note.muted {
+  background: var(--surface-soft);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
 .full-width {
   width: 100%;
 }

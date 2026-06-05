@@ -23,6 +23,7 @@ pub mod sticky;
 pub mod usage;
 pub mod vault;
 pub mod worker;
+pub mod workspace_insights;
 
 use thiserror::Error;
 

@@ -29,6 +29,7 @@ pub fn run() {
             commands::get_archive_map,
             commands::rebuild_archive_map,
             commands::get_ai_usage,
+            commands::get_workspace_insights,
             commands::rebuild_rag_index,
             commands::get_rag_index_status,
             commands::list_rag_conversations,

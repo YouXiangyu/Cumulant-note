@@ -93,6 +93,7 @@ import {
   RagMessage,
   RagScope,
   RagTraceRun,
+  RecentFileSummary,
   ResidentWorkerStatus,
   selectImportFiles,
   selectVault,
@@ -101,6 +102,7 @@ import {
   UsageSummary,
   VaultInitResult,
   VaultTreeNode,
+  WorkspaceInsights,
   WorkerRunResult,
   WorkerStatus,
 } from "./api";
@@ -121,6 +123,11 @@ interface ProjectItem {
   relativePath: string;
   updatedAt: string;
   count: number;
+  fileCount: number;
+  markdownCount: number;
+  totalBytes: number;
+  recentFiles: RecentFileSummary[];
+  source: "insights" | "tree" | "fallback";
 }
 
 const defaultRelativePath = "000-收集箱/新笔记.md";
@@ -128,9 +135,9 @@ const settingsStorageKey = "thebrain.settings";
 const notesStorageKey = "thebrain.stickyNotes";
 // Frontend concept fallback: used only when the Vault has no project-like directories.
 const fallbackProjects: ProjectItem[] = [
-  { id: "ai-exam", name: "人工智能-期末考试", relativePath: "100-学校/人工智能-期末考试", updatedAt: "10 分钟前", count: 12 },
-  { id: "deep-learning", name: "深度学习-期末报告", relativePath: "100-学校/深度学习-期末报告", updatedAt: "1 小时前", count: 8 },
-  { id: "front-dox", name: "front-dox", relativePath: "200-工作/front-dox", updatedAt: "6 小时前", count: 16 },
+  { id: "ai-exam", name: "人工智能-期末考试", relativePath: "100-学校/人工智能-期末考试", updatedAt: "占位", count: 12, fileCount: 12, markdownCount: 0, totalBytes: 0, recentFiles: [], source: "fallback" },
+  { id: "deep-learning", name: "深度学习-期末报告", relativePath: "100-学校/深度学习-期末报告", updatedAt: "占位", count: 8, fileCount: 8, markdownCount: 0, totalBytes: 0, recentFiles: [], source: "fallback" },
+  { id: "front-dox", name: "front-dox", relativePath: "200-工作/front-dox", updatedAt: "占位", count: 16, fileCount: 16, markdownCount: 0, totalBytes: 0, recentFiles: [], source: "fallback" },
 ];
 
 const basicNavItems: { id: ViewId; label: string; icon: ReactNode }[] = [
@@ -341,6 +348,7 @@ export default function App() {
   const [conflictRuleDrafts, setConflictRuleDrafts] = useState<Record<number, Partial<ConflictRule>>>({});
   const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
@@ -380,21 +388,48 @@ export default function App() {
   );
 
   const inboxFiles = useMemo(() => inbox.filter((item) => !item.isDir), [inbox]);
+  const vaultFiles = useMemo(() => allNodes.filter((node) => !node.isDir), [allNodes]);
 
   const projects = useMemo<ProjectItem[]>(() => {
+    const insightProjects = workspaceInsights?.isFallback
+      ? []
+      : (workspaceInsights?.projects ?? []).map((project) => ({
+          id: project.id || project.relativePath,
+          name: project.name || project.relativePath,
+          relativePath: project.relativePath,
+          updatedAt: project.updatedAt ?? "未记录",
+          count: project.fileCount,
+          fileCount: project.fileCount,
+          markdownCount: project.markdownCount,
+          totalBytes: project.totalBytes,
+          recentFiles: project.recentFiles,
+          source: "insights" as const,
+        }));
+    if (insightProjects.length > 0) return insightProjects;
+
     const topLevelDirs = tree
       .filter((node) => node.isDir && !node.name.startsWith("."))
       .filter((node) => node.name !== "000-收集箱")
       .slice(0, 8)
-      .map((node) => ({
-        id: node.relativePath,
-        name: node.name,
-        relativePath: node.relativePath,
-        updatedAt: "最近更新",
-        count: node.children.length,
-      }));
+      .map((node) => {
+        const descendants = flattenTree(node.children);
+        const files = descendants.filter((child) => !child.isDir);
+        const markdownCount = files.filter((child) => isMarkdownPath(child.relativePath)).length;
+        return {
+          id: node.relativePath,
+          name: node.name,
+          relativePath: node.relativePath,
+          updatedAt: "Vault 树派生",
+          count: files.length,
+          fileCount: files.length,
+          markdownCount,
+          totalBytes: 0,
+          recentFiles: [],
+          source: "tree" as const,
+        };
+      });
     return topLevelDirs.length > 0 ? topLevelDirs : fallbackProjects;
-  }, [tree]);
+  }, [tree, workspaceInsights]);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? projects[0],
@@ -451,6 +486,22 @@ export default function App() {
       .slice(0, 4);
   }, [markdownFiles, recentMarkdown, relativePath]);
 
+  const projectRelatedFiles = useMemo<RecentFileSummary[]>(() => {
+    if (selectedProject?.recentFiles.length) {
+      return selectedProject.recentFiles.slice(0, 5);
+    }
+    if (!selectedProject?.relativePath) return [];
+    return markdownFiles
+      .filter((node) => node.relativePath.startsWith(selectedProject.relativePath))
+      .slice(0, 5)
+      .map((node) => ({
+        name: node.name,
+        relativePath: node.relativePath,
+        extension: "md",
+        sizeBytes: 0,
+      }));
+  }, [markdownFiles, selectedProject]);
+
   const previewHtml = useMemo(() => {
     const markdown = markdownDoc?.previewMarkdown ?? content;
     const unsafeHtml = marked.parse(markdown, { async: false }) as string;
@@ -475,6 +526,47 @@ export default function App() {
     : mimoStatus?.hasKey
       ? `已找到 key：${mimoStatus.keySource ?? "runtime"}（未验证连接）`
       : "缺少 MIMO_API_KEY 或本地 .secrets key";
+  const insightsAreFallback = hasFallback(workspaceInsights);
+  const realWorkspaceInsights = workspaceInsights && !insightsAreFallback ? workspaceInsights : null;
+  const insightsFallbackText = insightsAreFallback
+    ? `统计降级/占位：${workspaceInsights?.fallbackReason ?? "get_workspace_insights 不可用"}`
+    : "";
+  const vaultFileCount = realWorkspaceInsights?.vault.fileCount ?? vaultFiles.length;
+  const vaultMarkdownCount = realWorkspaceInsights?.vault.markdownCount ?? markdownFiles.length;
+  const ragDocumentCount =
+    realWorkspaceInsights?.rag.documentCount ?? (ragStatus?.isFallback ? 0 : ragStatus?.documentCount ?? 0);
+  const ragConversationCount =
+    realWorkspaceInsights?.rag.conversationCount ??
+    ragConversations.filter((conversation) => !conversation.isFallback).length;
+  const pendingTodoCount =
+    realWorkspaceInsights?.candidates.pendingTodo ??
+    pendingCandidates.filter((candidate) => candidate.kind === "todo" && !candidate.isFallback).length;
+  const pendingScheduleCount =
+    realWorkspaceInsights?.candidates.pendingSchedule ??
+    pendingCandidates.filter((candidate) => candidate.kind === "schedule" && !candidate.isFallback).length;
+  const stickyActiveCount =
+    realWorkspaceInsights?.sticky.active ?? stickyNotes.filter((note) => !note.isFallback).length;
+  const movementCompletedCount =
+    realWorkspaceInsights?.movement.completed ??
+    moveLogs.filter((log) => ["completed", "moved"].includes(log.status)).length;
+  const movementIssueCount =
+    realWorkspaceInsights
+      ? realWorkspaceInsights.movement.conflict + realWorkspaceInsights.movement.failed
+      : moveLogs.filter((log) => ["conflict", "failed"].includes(log.status)).length;
+  const recentAuditCount =
+    realWorkspaceInsights?.audit.recentCount ?? auditEvents.filter((event) => !event.isFallback).length;
+  const latestAuditEventType = realWorkspaceInsights?.audit.latestEventType ?? auditEvents[0]?.eventType;
+  const latestAuditAt = realWorkspaceInsights?.audit.latestAt ?? auditEvents[0]?.createdAt;
+  const recentWorkspaceFiles =
+    realWorkspaceInsights?.recentFiles.length
+      ? realWorkspaceInsights.recentFiles.slice(0, 5)
+      : recentMarkdown.map((file) => ({
+          name: file.name,
+          relativePath: file.relativePath,
+          extension: "md",
+          sizeBytes: 0,
+          modifiedAt: undefined,
+        }));
 
   useEffect(() => {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
@@ -491,7 +583,7 @@ export default function App() {
   }, [activeNoteId, stickyNotes]);
 
   useEffect(() => {
-    if (!selectedProjectId && projects[0]) {
+    if (projects[0] && (!selectedProjectId || !projects.some((project) => project.id === selectedProjectId))) {
       setSelectedProjectId(projects[0].id);
     }
   }, [projects, selectedProjectId]);
@@ -563,7 +655,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus, nextRagConversations] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextWorkspaceInsights, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus, nextRagConversations] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -576,6 +668,7 @@ export default function App() {
         nextVaultPath ? commands.listConflictRules(nextVaultPath, true) : Promise.resolve([]),
         nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
         nextVaultPath ? commands.listAuditEvents(nextVaultPath, 30) : Promise.resolve([]),
+        nextVaultPath ? commands.getWorkspaceInsights(nextVaultPath) : Promise.resolve(null),
         commands.listTodoScheduleCandidates(nextVaultPath),
         commands.listStickyNotes(nextVaultPath),
         nextVaultPath ? commands.getMimoStatus(nextVaultPath) : Promise.resolve(null),
@@ -596,6 +689,7 @@ export default function App() {
     setConflictRules(nextConflictRules);
     setMoveLogs(nextMoveLogs);
     setAuditEvents(nextAuditEvents);
+    setWorkspaceInsights(nextWorkspaceInsights);
     setTodoCandidates(nextTodoCandidates);
     if (nextNotes.length > 0) {
       setStickyNotes(nextNotes);
@@ -3010,59 +3104,64 @@ export default function App() {
   }
 
   function renderPersonalPage() {
-    // Concept page: keep the designed personal workspace UI, but most metrics below are placeholders until
-    // TODO, review, focus-time, relationship, and long-term stats services are implemented.
+    // Personal workspace is partially data-backed by get_workspace_insights.
+    // Learning progress and review recommendations remain future/placeholder surfaces.
     return (
       <div className="personal-page">
+        {insightsFallbackText ? <p className="insights-note">{insightsFallbackText}</p> : null}
         <section className="concept-grid three">
           <article className="concept-card chart-card">
             <div className="card-heading">
-              <h3><FileText size={18} aria-hidden="true" /> 文件活跃度</h3>
-              <button type="button" className="chip-button">近 30 天</button>
+              <h3><FileText size={18} aria-hidden="true" /> Vault 统计</h3>
+              <button type="button" className="chip-button">{realWorkspaceInsights ? "真实统计" : "树派生"}</button>
             </div>
             <div className="stat-pair">
-              <div><span>本月创建</span><strong>{markdownFiles.length + inboxFiles.length}</strong></div>
-              <div><span>本月修改</span><strong>{Math.max(18, markdownFiles.length * 3)}</strong></div>
+              <div><span>Vault 文件</span><strong>{vaultFileCount}</strong></div>
+              <div><span>Markdown</span><strong>{vaultMarkdownCount}</strong></div>
             </div>
             <div className="line-chart" aria-label="文件活跃度趋势">
               <i style={{ height: "35%" }} /><i style={{ height: "62%" }} /><i style={{ height: "48%" }} /><i style={{ height: "76%" }} /><i style={{ height: "58%" }} /><i style={{ height: "82%" }} /><i style={{ height: "64%" }} />
             </div>
+            <p className="insights-note muted">趋势图仍为后续时间序列占位。</p>
           </article>
 
           <article className="concept-card">
             <div className="card-heading">
-              <h3><FileText size={18} aria-hidden="true" /> 常用文件与打开频率</h3>
-              <button type="button" className="chip-button">近 30 天</button>
+              <h3><FileText size={18} aria-hidden="true" /> 最近文件</h3>
+              <button type="button" className="chip-button">{realWorkspaceInsights ? "Vault/SQLite" : "树派生"}</button>
             </div>
             <div className="rank-list">
-              {recentMarkdown.slice(0, 5).map((file, index) => (
-                <button type="button" key={file.relativePath} onClick={() => openMarkdown(file.relativePath)}>
+              {recentWorkspaceFiles.map((file, index) => (
+                <button type="button" key={file.relativePath} onClick={() => isMarkdownPath(file.relativePath) ? openMarkdown(file.relativePath) : setRelativePath(file.relativePath)}>
                   <strong>{index + 1}</strong>
                   <span>{file.name}</span>
-                  <small>{48 - index * 6} 次</small>
+                  <small>{file.modifiedAt ? formatDate(file.modifiedAt) : formatBytes(file.sizeBytes)}</small>
                   <i style={{ width: `${75 - index * 8}%` }} />
                 </button>
               ))}
-              {recentMarkdown.length === 0 ? <p className="empty-state">暂无常用文件数据</p> : null}
+              {recentWorkspaceFiles.length === 0 ? <p className="empty-state">暂无最近文件数据</p> : null}
             </div>
           </article>
 
           <article className="concept-card">
             <div className="card-heading">
-              <h3><Target size={18} aria-hidden="true" /> 目标 / TODO / 愿景 / 创意想法</h3>
+              <h3><Target size={18} aria-hidden="true" /> TODO / 日程 / 便签</h3>
             </div>
             <div className="goal-grid">
-              <div><Target size={26} aria-hidden="true" /><strong>8</strong><span>目标</span></div>
-              <div><CheckCircle2 size={26} aria-hidden="true" /><strong>{pendingCandidates.length || 25}</strong><span>TODO</span></div>
-              <div><Star size={26} aria-hidden="true" /><strong>3</strong><span>愿景</span></div>
-              <div><Lightbulb size={26} aria-hidden="true" /><strong>17</strong><span>创意想法</span></div>
+              <div><CheckCircle2 size={26} aria-hidden="true" /><strong>{pendingTodoCount}</strong><span>待确认 TODO</span></div>
+              <div><Calendar size={26} aria-hidden="true" /><strong>{pendingScheduleCount}</strong><span>待确认日程</span></div>
+              <div><StickyNote size={26} aria-hidden="true" /><strong>{stickyActiveCount}</strong><span>活跃便签</span></div>
+              <div><Star size={26} aria-hidden="true" /><strong>{realWorkspaceInsights?.candidates.confirmed ?? todoCandidates.filter((candidate) => candidate.status === "confirmed").length}</strong><span>已确认候选</span></div>
             </div>
           </article>
         </section>
 
         <section className="concept-grid three">
           <article className="concept-card">
-            <div className="card-heading"><h3><Activity size={18} aria-hidden="true" /> 学习进度</h3></div>
+            <div className="card-heading">
+              <h3><Activity size={18} aria-hidden="true" /> 学习进度</h3>
+              <button type="button" className="chip-button">后续/占位</button>
+            </div>
             {["期末复习进度", "《深度学习》阅读进度", "CS61A 课程学习"].map((item, index) => (
               <div className="progress-line" key={item}>
                 <span>{item}</span>
@@ -3075,7 +3174,7 @@ export default function App() {
           <article className="concept-card">
             <div className="card-heading">
               <h3><Shield size={18} aria-hidden="true" /> 推荐复习</h3>
-              <button type="button" className="chip-button">智能推荐</button>
+              <button type="button" className="chip-button">后续/占位</button>
             </div>
             <div className="review-table">
               {["线性代数基础知识", "深度学习-损失函数", "Python 装饰器详解", "计算机网络-TCP 三次握手"].map((item, index) => (
@@ -3089,33 +3188,51 @@ export default function App() {
 
           <article className="concept-card">
             <div className="card-heading">
-              <h3><Database size={18} aria-hidden="true" /> 最近积累</h3>
-              <button type="button" className="chip-button">近 7 天</button>
+              <h3><Database size={18} aria-hidden="true" /> RAG 与候选积累</h3>
+              <button type="button" className="chip-button">{realWorkspaceInsights ? "真实统计" : "状态派生"}</button>
             </div>
             <div className="accumulation-list">
-              <div><FileText size={22} aria-hidden="true" /><span>新建笔记</span><strong>{markdownFiles.length || 18}</strong></div>
-              <div><Archive size={22} aria-hidden="true" /><span>收藏内容</span><strong>{ledger.length || 9}</strong></div>
-              <div><Bot size={22} aria-hidden="true" /><span>知识增长</span><strong>+145</strong></div>
+              <div><FileText size={22} aria-hidden="true" /><span>RAG 文档</span><strong>{ragDocumentCount}</strong></div>
+              <div><MessageCircle size={22} aria-hidden="true" /><span>RAG 会话</span><strong>{ragConversationCount}</strong></div>
+              <div><Bot size={22} aria-hidden="true" /><span>候选总数</span><strong>{realWorkspaceInsights?.candidates.total ?? todoCandidates.filter((candidate) => !candidate.isFallback).length}</strong></div>
             </div>
           </article>
         </section>
 
         <section className="stats-ribbon">
-          <div><Activity size={29} aria-hidden="true" /><strong>16 天</strong><span>连续记录</span></div>
-          <div><Clock3 size={29} aria-hidden="true" /><strong>2.6 小时</strong><span>今日专注时长</span></div>
-          <div><CheckCircle2 size={29} aria-hidden="true" /><strong>12 项</strong><span>本周完成任务</span></div>
-          <div><Link2 size={29} aria-hidden="true" /><strong>{allNodes.length}</strong><span>知识连接数</span></div>
-          <div><Lightbulb size={29} aria-hidden="true" /><strong>7 次</strong><span>灵感时刻</span></div>
+          <div><Activity size={29} aria-hidden="true" /><strong>{vaultFileCount}</strong><span>Vault 文件</span></div>
+          <div><FileText size={29} aria-hidden="true" /><strong>{vaultMarkdownCount}</strong><span>Markdown</span></div>
+          <div><CheckCircle2 size={29} aria-hidden="true" /><strong>{recentAuditCount}</strong><span>近期 audit</span></div>
+          <div><Archive size={29} aria-hidden="true" /><strong>{movementCompletedCount}</strong><span>已完成移动</span></div>
+          <div><Shield size={29} aria-hidden="true" /><strong>{movementIssueCount}</strong><span>冲突/失败</span></div>
         </section>
+        <p className="insights-note">
+          最新 audit：{latestAuditEventType ? `${latestAuditEventType} / ${formatDate(latestAuditAt)}` : "暂无记录"}。
+        </p>
       </div>
     );
   }
 
   function renderProjectWorkspace() {
-    // Concept page: project aggregation currently mixes real Vault files with placeholder Agent history,
-    // progress, and TODO data. Remove these placeholders when project backend services are connected.
+    const projectFileCount = selectedProject?.fileCount ?? 0;
+    const projectMarkdownCount = selectedProject?.markdownCount ?? 0;
+    const projectProgress =
+      projectFileCount > 0 ? Math.round((projectMarkdownCount / projectFileCount) * 100) : 0;
+    const projectSourceLabel =
+      selectedProject?.source === "insights" ? "真实统计" : selectedProject?.source === "tree" ? "Vault 树派生" : "占位兜底";
+    const projectScopedCandidates = pendingCandidates
+      .filter((candidate) => !candidate.isFallback)
+      .filter((candidate) => selectedProject?.relativePath && candidate.sourceRelativePath.startsWith(selectedProject.relativePath))
+      .slice(0, 4);
+    const projectAuditRows = auditEvents.filter((event) => !event.isFallback).slice(0, 4);
+
     return (
       <div className="project-page">
+        {insightsFallbackText || selectedProject?.source !== "insights" ? (
+          <p className="insights-note">
+            {insightsFallbackText || `项目统计使用${projectSourceLabel}，后端 projects insights 暂无可用数据。`}
+          </p>
+        ) : null}
         <div className="project-title-row">
           <div>
             <span>项目工作台</span>
@@ -3124,10 +3241,10 @@ export default function App() {
               {selectedProject?.name ?? "TheBrain"}
               <ChevronDown size={18} aria-hidden="true" />
             </h2>
-            <p>智能文档审查与生成工具 · 最近更新 {selectedProject?.updatedAt ?? "6 小时前"}</p>
+            <p>{projectSourceLabel} · 文件 {projectFileCount} · Markdown {projectMarkdownCount} · 最近更新 {formatDate(selectedProject?.updatedAt)}</p>
           </div>
           <div className="project-actions">
-            <button type="button" className="ghost-button"><Settings size={16} aria-hidden="true" /> 项目设置</button>
+            <button type="button" className="ghost-button" disabled><Settings size={16} aria-hidden="true" /> 设置后续</button>
             <button type="button" className="icon-soft-button"><MoreHorizontal size={16} aria-hidden="true" /></button>
           </div>
         </div>
@@ -3135,51 +3252,53 @@ export default function App() {
         <section className="project-grid">
           <article className="concept-card">
             <div className="card-heading"><h3><ClipboardCheck size={18} aria-hidden="true" /> 项目概览</h3></div>
-            <p>构建一个智能文档审查与生成平台，支持团队协作、多格式解析与 AI 辅助写作。</p>
+            <p>{selectedProject?.relativePath ?? "未选择项目"} · {formatBytes(selectedProject?.totalBytes)} · {projectSourceLabel}</p>
             <div className="milestone-row">
               <CheckCircle2 size={17} aria-hidden="true" />
-              <span>实现文档解析与本地检索索引</span>
-              <small>6 小时前</small>
+              <span>{projectMarkdownCount} 个 Markdown / {projectFileCount} 个文件</span>
+              <small>{formatDate(selectedProject?.updatedAt)}</small>
             </div>
-            <div className="project-progress"><i style={{ width: "62%" }} /></div>
-            <footer><span>创建于 1 周前</span><strong>62%</strong></footer>
+            <div className="project-progress"><i style={{ width: `${projectProgress}%` }} /></div>
+            <footer><span>Markdown 占比</span><strong>{projectProgress}%</strong></footer>
           </article>
 
           <article className="concept-card">
             <div className="card-heading">
-              <h3><MessageSquare size={18} aria-hidden="true" /> 最近对话 / Agent 历史</h3>
-              <button type="button" className="text-link-button">查看全部</button>
+              <h3><MessageSquare size={18} aria-hidden="true" /> 最新 Audit / Agent 历史</h3>
+              <button type="button" className="chip-button">后续/占位</button>
             </div>
             <div className="agent-history">
-              {["实现文档解析与本地检索索引", "确认进度", "同步到 GitHub", "Build GO repo scaffold plus S1 web framework", "列出项目技能"].map((item, index) => (
-                <div key={item}>
+              {projectAuditRows.length > 0 ? projectAuditRows.map((event) => (
+                <div key={event.id}>
                   <MessageCircle size={16} aria-hidden="true" />
-                  <span>{item}</span>
-                  <small>{index < 2 ? "6 小时前" : "1 周前"}</small>
+                  <span>{event.eventType}</span>
+                  <small>{formatDate(event.createdAt)}</small>
                 </div>
-              ))}
+              )) : latestAuditEventType ? (
+                <div>
+                  <MessageCircle size={16} aria-hidden="true" />
+                  <span>{latestAuditEventType}</span>
+                  <small>{formatDate(latestAuditAt)}</small>
+                </div>
+              ) : (
+                <p className="empty-state">暂无真实 Agent history；后续接入项目级 Agent 事件。</p>
+              )}
             </div>
           </article>
 
           <article className="concept-card">
             <div className="card-heading">
               <h3><FileText size={18} aria-hidden="true" /> 相关文件</h3>
-              <button type="button" className="text-link-button">查看全部</button>
+              <button type="button" className="chip-button">{selectedProject?.source === "insights" ? "recentFiles" : "树派生"}</button>
             </div>
             <div className="project-files">
-              {relatedFiles.length > 0 ? relatedFiles.map((file) => (
-                <button type="button" key={file.relativePath} onClick={() => openMarkdown(file.relativePath)}>
+              {projectRelatedFiles.length > 0 ? projectRelatedFiles.map((file) => (
+                <button type="button" key={file.relativePath} onClick={() => isMarkdownPath(file.relativePath) ? openMarkdown(file.relativePath) : setRelativePath(file.relativePath)}>
                   {fileIcon(file.relativePath)}
                   <span>{file.name}</span>
-                  <small>最近更新</small>
+                  <small>{file.modifiedAt ? formatDate(file.modifiedAt) : formatBytes(file.sizeBytes)}</small>
                 </button>
-              )) : ["产品需求文档 PRD.md", "系统架构设计 V1.1.md", "接口规范 API.md", "项目计划 Roadmap.md"].map((file, index) => (
-                <button type="button" key={file}>
-                  <FileText size={16} aria-hidden="true" />
-                  <span>{file}</span>
-                  <small>{index === 0 ? "12 小时前" : `${index} 天前`}</small>
-                </button>
-              ))}
+              )) : <p className="empty-state">暂无来自当前项目的真实相关文件。</p>}
             </div>
             <button type="button" className="full-width ghost-button" onClick={() => setActiveView("inbox")}>
               <Plus size={16} aria-hidden="true" />
@@ -3195,26 +3314,29 @@ export default function App() {
           <article className="concept-card">
             <div className="card-heading">
               <h3><ListChecks size={18} aria-hidden="true" /> 下一步行动 / TODO</h3>
-              <button type="button" className="text-link-button">添加任务</button>
+              <button type="button" className="chip-button">候选/后续</button>
             </div>
             <div className="project-todos">
-              {["完善文档上传与解析流程", "实现文档权限与协作功能", "接入全文搜索与问答能力", "优化解析性能与稳定性"].map((item, index) => (
-                <label key={item}>
-                  <input type="checkbox" />
-                  <span>{item}</span>
-                  <small>{["今天", "3 天内", "5 天内", "1 周内"][index]}</small>
+              {projectScopedCandidates.map((candidate) => (
+                <label key={candidate.id}>
+                  <input type="checkbox" checked={candidate.status === "confirmed"} readOnly />
+                  <span>{candidate.title}</span>
+                  <small>{candidate.kind === "schedule" ? "日程候选" : "TODO 候选"}</small>
                 </label>
               ))}
+              {projectScopedCandidates.length === 0 ? (
+                <p className="empty-state">暂无项目路径匹配的真实候选；正式项目任务系统后续接入。</p>
+              ) : null}
             </div>
           </article>
         </section>
 
         <section className="quick-actions">
           <span>快速操作：</span>
-          <button type="button"><Pencil size={15} aria-hidden="true" /> 新建文档</button>
+          <button type="button" onClick={() => setActiveView("markdown")}><Pencil size={15} aria-hidden="true" /> 打开 Markdown</button>
           <button type="button" onClick={() => setActiveView("inbox")}><Upload size={15} aria-hidden="true" /> 上传文件</button>
-          <button type="button"><CheckCircle2 size={15} aria-hidden="true" /> 创建任务</button>
-          <button type="button"><Link2 size={15} aria-hidden="true" /> 同步到 GitHub</button>
+          <button type="button" disabled><CheckCircle2 size={15} aria-hidden="true" /> 任务后续</button>
+          <button type="button" disabled><Link2 size={15} aria-hidden="true" /> GitHub 后续</button>
         </section>
       </div>
     );
@@ -3375,6 +3497,7 @@ export default function App() {
           <span>预算：{budgetStatus ? formatBudget(budgetStatus.remainingCents) : "未连接"}</span>
           <span>MiMo：{mimoKeyLabel}</span>
           <span>RAG：{ragStatus ? `${ragStatus.documentCount} 文档 / ${ragStatus.chunkCount} chunks` : "未连接"}</span>
+          <span>Insights：{workspaceInsights ? (insightsAreFallback ? "统计降级/占位" : "已连接") : "未连接"}</span>
           {initResult ? <span>Index 已初始化</span> : null}
           {usage?.isFallback ? <span>Usage fallback</span> : null}
         </div>

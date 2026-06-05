@@ -29,6 +29,7 @@ use crate::services::vault::{
     canonical_vault_root, VaultInitResult, VaultService, VaultTreeNode, INBOX_DIR,
 };
 use crate::services::worker::{WorkerRunOptions, WorkerRunResult, WorkerService, WorkerStatus};
+use crate::services::workspace_insights::{WorkspaceInsights, WorkspaceInsightsService};
 use chrono::Utc;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -375,6 +376,11 @@ pub fn rebuild_archive_map(vault_path: String) -> Result<ArchiveMapSnapshot, Str
 #[tauri::command]
 pub fn get_ai_usage(vault_path: String) -> Result<UsageSummary, String> {
     into_command_result(UsageService::summary(&vault_path))
+}
+
+#[tauri::command]
+pub fn get_workspace_insights(vault_path: String) -> Result<WorkspaceInsights, String> {
+    into_command_result(WorkspaceInsightsService::get(&vault_path))
 }
 
 #[tauri::command]

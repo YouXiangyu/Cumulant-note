@@ -178,7 +178,7 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 
 后端逐步补齐真实能力。前端不应把未实现后端能力伪装成真实成功。
 
-个人页和项目工作台当前可以先作为前端概念页保留，按设计图表达目标体验；学习曲线、复杂统计、Agent 历史、联系人档案等未接后端的数据必须以占位实现对待。能力真实接入后，应删除对应占位数据和注释，改为从 Vault、Markdown、SQLite 或 Tauri command 读取。
+个人页和项目工作台已接入 Workspace Insights 第一版：后端通过 `get_workspace_insights` 只读扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、movement、audit 和 sticky 计数；前端优先使用这些真实统计。学习曲线、项目级 Agent 历史、联系人档案、正式任务系统和复杂长期统计仍按后续能力处理，不能描述为已完成。
 
 ## 8. 当前主要服务
 
@@ -196,6 +196,7 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 - `retrieval.rs`：检索通道、范围过滤和评分。
 - `chunking.rs`：Markdown 分块。
 - `rag_trace.rs`：Trace 持久化。
+- `workspace_insights.rs`：个人页和项目工作台的只读统计聚合。
 - `index.rs`：SQLite schema。
 - `budget.rs` / `usage.rs`：预算和用量。
 - `sticky.rs`：便利贴。

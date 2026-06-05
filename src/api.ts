@@ -485,6 +485,83 @@ export interface StickyNote extends CommandMeta {
   updatedAt: string;
 }
 
+export interface RecentFileSummary extends CommandMeta {
+  name: string;
+  relativePath: string;
+  extension?: string;
+  sizeBytes: number;
+  modifiedAt?: string;
+}
+
+export interface WorkspaceVaultInsights extends CommandMeta {
+  fileCount: number;
+  directoryCount: number;
+  markdownCount: number;
+  totalBytes: number;
+  updatedAt?: string;
+}
+
+export interface WorkspaceProjectInsight extends CommandMeta {
+  id: string;
+  name: string;
+  relativePath: string;
+  fileCount: number;
+  markdownCount: number;
+  totalBytes: number;
+  updatedAt?: string;
+  recentFiles: RecentFileSummary[];
+}
+
+export interface WorkspaceRagInsights extends CommandMeta {
+  documentCount: number;
+  chunkCount: number;
+  conversationCount: number;
+  messageCount: number;
+  queryCount: number;
+  lastRunStatus?: string;
+}
+
+export interface WorkspaceCandidateInsights extends CommandMeta {
+  pendingTodo: number;
+  pendingSchedule: number;
+  confirmed: number;
+  rejected: number;
+  total: number;
+}
+
+export interface WorkspaceMovementInsights extends CommandMeta {
+  completed: number;
+  rolledBack: number;
+  conflict: number;
+  failed: number;
+  total: number;
+}
+
+export interface WorkspaceAuditInsights extends CommandMeta {
+  total: number;
+  recentCount: number;
+  latestEventType?: string;
+  latestAt?: string;
+}
+
+export interface WorkspaceStickyInsights extends CommandMeta {
+  active: number;
+  archived: number;
+  pinned: number;
+  total: number;
+}
+
+export interface WorkspaceInsights extends CommandMeta {
+  vault: WorkspaceVaultInsights;
+  projects: WorkspaceProjectInsight[];
+  recentFiles: RecentFileSummary[];
+  rag: WorkspaceRagInsights;
+  candidates: WorkspaceCandidateInsights;
+  movement: WorkspaceMovementInsights;
+  audit: WorkspaceAuditInsights;
+  sticky: WorkspaceStickyInsights;
+}
+
 export type ConflictResolutionAction = "keep_existing" | "overwrite" | "rename" | "skip";
 
 export interface ConflictPreviewFile {
@@ -631,6 +708,11 @@ function toMessage(error: unknown): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function toNumber(value: unknown, fallback = 0): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
 }
 
 async function invokeWithFallback<T>(
@@ -962,6 +1044,167 @@ function fallbackTodoScheduleCandidates(reason: string): TodoScheduleCandidate[]
       fallbackReason: reason,
     },
   ];
+}
+
+function fallbackWorkspaceInsights(reason: string): WorkspaceInsights {
+  return {
+    vault: {
+      fileCount: 0,
+      directoryCount: 0,
+      markdownCount: 0,
+      totalBytes: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    projects: [],
+    recentFiles: [],
+    rag: {
+      documentCount: 0,
+      chunkCount: 0,
+      conversationCount: 0,
+      messageCount: 0,
+      queryCount: 0,
+      lastRunStatus: "fallback",
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    candidates: {
+      pendingTodo: 0,
+      pendingSchedule: 0,
+      confirmed: 0,
+      rejected: 0,
+      total: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    movement: {
+      completed: 0,
+      rolledBack: 0,
+      conflict: 0,
+      failed: 0,
+      total: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    audit: {
+      total: 0,
+      recentCount: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    sticky: {
+      active: 0,
+      archived: 0,
+      pinned: 0,
+      total: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function normalizeRecentFileSummary(raw: any): RecentFileSummary {
+  const relativePath = String(raw?.relativePath ?? raw?.relative_path ?? "");
+  const inferredName = relativePath.split(/[\\/]/).filter(Boolean).pop() ?? "";
+  return {
+    name: String(raw?.name ?? inferredName),
+    relativePath,
+    extension: raw?.extension,
+    sizeBytes: toNumber(raw?.sizeBytes ?? raw?.size_bytes),
+    modifiedAt: raw?.modifiedAt ?? raw?.modified_at,
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
+  };
+}
+
+function normalizeWorkspaceInsights(raw: any): WorkspaceInsights {
+  const vault = raw?.vault ?? {};
+  const rag = raw?.rag ?? {};
+  const candidates = raw?.candidates ?? {};
+  const movement = raw?.movement ?? {};
+  const audit = raw?.audit ?? {};
+  const sticky = raw?.sticky ?? {};
+  const isFallback = raw?.isFallback ?? raw?.is_fallback;
+  const fallbackReason = raw?.fallbackReason ?? raw?.fallback_reason;
+
+  return {
+    vault: {
+      fileCount: toNumber(vault.fileCount ?? vault.file_count),
+      directoryCount: toNumber(vault.directoryCount ?? vault.directory_count),
+      markdownCount: toNumber(vault.markdownCount ?? vault.markdown_count),
+      totalBytes: toNumber(vault.totalBytes ?? vault.total_bytes),
+      updatedAt: vault.updatedAt ?? vault.updated_at,
+      isFallback: vault.isFallback ?? vault.is_fallback ?? isFallback,
+      fallbackReason: vault.fallbackReason ?? vault.fallback_reason ?? fallbackReason,
+    },
+    projects: Array.isArray(raw?.projects)
+      ? raw.projects.map((project: any) => ({
+          id: String(project?.id ?? project?.relativePath ?? project?.relative_path ?? ""),
+          name: String(project?.name ?? project?.relativePath ?? project?.relative_path ?? ""),
+          relativePath: String(project?.relativePath ?? project?.relative_path ?? ""),
+          fileCount: toNumber(project?.fileCount ?? project?.file_count),
+          markdownCount: toNumber(project?.markdownCount ?? project?.markdown_count),
+          totalBytes: toNumber(project?.totalBytes ?? project?.total_bytes),
+          updatedAt: project?.updatedAt ?? project?.updated_at,
+          recentFiles: Array.isArray(project?.recentFiles ?? project?.recent_files)
+            ? (project.recentFiles ?? project.recent_files).map(normalizeRecentFileSummary)
+            : [],
+          isFallback: project?.isFallback ?? project?.is_fallback ?? isFallback,
+          fallbackReason: project?.fallbackReason ?? project?.fallback_reason ?? fallbackReason,
+        }))
+      : [],
+    recentFiles: Array.isArray(raw?.recentFiles ?? raw?.recent_files)
+      ? (raw.recentFiles ?? raw.recent_files).map(normalizeRecentFileSummary)
+      : [],
+    rag: {
+      documentCount: toNumber(rag.documentCount ?? rag.document_count),
+      chunkCount: toNumber(rag.chunkCount ?? rag.chunk_count),
+      conversationCount: toNumber(rag.conversationCount ?? rag.conversation_count),
+      messageCount: toNumber(rag.messageCount ?? rag.message_count),
+      queryCount: toNumber(rag.queryCount ?? rag.query_count),
+      lastRunStatus: rag.lastRunStatus ?? rag.last_run_status,
+      isFallback: rag.isFallback ?? rag.is_fallback ?? isFallback,
+      fallbackReason: rag.fallbackReason ?? rag.fallback_reason ?? fallbackReason,
+    },
+    candidates: {
+      pendingTodo: toNumber(candidates.pendingTodo ?? candidates.pending_todo),
+      pendingSchedule: toNumber(candidates.pendingSchedule ?? candidates.pending_schedule),
+      confirmed: toNumber(candidates.confirmed),
+      rejected: toNumber(candidates.rejected),
+      total: toNumber(candidates.total),
+      isFallback: candidates.isFallback ?? candidates.is_fallback ?? isFallback,
+      fallbackReason: candidates.fallbackReason ?? candidates.fallback_reason ?? fallbackReason,
+    },
+    movement: {
+      completed: toNumber(movement.completed),
+      rolledBack: toNumber(movement.rolledBack ?? movement.rolled_back),
+      conflict: toNumber(movement.conflict),
+      failed: toNumber(movement.failed),
+      total: toNumber(movement.total),
+      isFallback: movement.isFallback ?? movement.is_fallback ?? isFallback,
+      fallbackReason: movement.fallbackReason ?? movement.fallback_reason ?? fallbackReason,
+    },
+    audit: {
+      total: toNumber(audit.total),
+      recentCount: toNumber(audit.recentCount ?? audit.recent_count),
+      latestEventType: audit.latestEventType ?? audit.latest_event_type,
+      latestAt: audit.latestAt ?? audit.latest_at,
+      isFallback: audit.isFallback ?? audit.is_fallback ?? isFallback,
+      fallbackReason: audit.fallbackReason ?? audit.fallback_reason ?? fallbackReason,
+    },
+    sticky: {
+      active: toNumber(sticky.active),
+      archived: toNumber(sticky.archived),
+      pinned: toNumber(sticky.pinned),
+      total: toNumber(sticky.total),
+      isFallback: sticky.isFallback ?? sticky.is_fallback ?? isFallback,
+      fallbackReason: sticky.fallbackReason ?? sticky.fallback_reason ?? fallbackReason,
+    },
+    isFallback,
+    fallbackReason,
+  };
 }
 
 function normalizeQueueStatus(raw: any): QueueStatus {
@@ -1376,6 +1619,12 @@ export const commands = {
   listInbox: (vaultPath: string) => invoke<InboxItem[]>("list_inbox", { vaultPath }),
   parseInboxLedger: (vaultPath: string) =>
     invoke<LedgerItem[]>("parse_inbox_ledger", { vaultPath }),
+  getWorkspaceInsights: (vaultPath: string) =>
+    invokeWithFallback<any>(
+      "get_workspace_insights",
+      { vaultPath },
+      fallbackWorkspaceInsights,
+    ).then(normalizeWorkspaceInsights),
   getArchiveMap: (vaultPath: string) =>
     invokeWithFallback<ArchiveMapSnapshot>("get_archive_map", { vaultPath }, fallbackArchiveMap),
   rebuildArchiveMap: (vaultPath: string) =>
