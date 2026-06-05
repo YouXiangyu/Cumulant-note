@@ -157,6 +157,11 @@ function flattenTree(nodes: VaultTreeNode[]): VaultTreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenTree(node.children)]);
 }
 
+function parentTreePaths(relativePath: string): string[] {
+  const segments = relativePath.split("/").filter(Boolean);
+  return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
+}
+
 function formatDate(value?: string | number): string {
   if (!value) return "未记录";
   const date = new Date(value);
@@ -269,6 +274,7 @@ export default function App() {
   const [ragIndexRun, setRagIndexRun] = useState<RagIndexRun | null>(null);
   const [ragAnswer, setRagAnswer] = useState<RagAnswer | null>(null);
   const [ragTrace, setRagTrace] = useState<RagTraceRun | null>(null);
+  const [ragIsAsking, setRagIsAsking] = useState(false);
   const [exported, setExported] = useState("");
   const [status, setStatus] = useState("等待选择 Vault");
   const [appError, setAppError] = useState<AppError | null>(null);
@@ -290,6 +296,7 @@ export default function App() {
   const [extractResult, setExtractResult] = useState<MimoExtractResult | null>(null);
   const [importResults, setImportResults] = useState<InboxImportResult[]>([]);
   const [mimoStatus, setMimoStatus] = useState<MimoStatus | null>(null);
+  const [mimoKeyInput, setMimoKeyInput] = useState("");
   const [selectedInboxPath, setSelectedInboxPath] = useState("");
   const [targetMovePath, setTargetMovePath] = useState("");
   const [rollbackAuditId, setRollbackAuditId] = useState("");
@@ -306,6 +313,9 @@ export default function App() {
   const [activeNoteId, setActiveNoteId] = useState("");
   const [dirtyNoteId, setDirtyNoteId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [expandedTreePaths, setExpandedTreePaths] = useState<Set<string>>(
+    () => new Set(parentTreePaths(defaultRelativePath)),
+  );
 
   const allNodes = useMemo(() => flattenTree(tree), [tree]);
 
@@ -373,6 +383,16 @@ export default function App() {
     budgetStatus && budgetStatus.monthlyLimitCents > 0
       ? Math.min(1, budgetStatus.spentCents / budgetStatus.monthlyLimitCents)
       : 0;
+  const mimoKeyLabel = mimoStatus?.keyNeedsCleanup
+    ? "Key BOM"
+    : mimoStatus?.hasKey
+      ? "MiMo key"
+      : "本地检索";
+  const mimoSettingsSummary = mimoStatus?.keyNeedsCleanup
+    ? `检测到 BOM：${mimoStatus.keySource ?? "runtime"}`
+    : mimoStatus?.hasKey
+      ? `已找到 key：${mimoStatus.keySource ?? "runtime"}（未验证连接）`
+      : "缺少 MIMO_API_KEY 或本地 .secrets key";
 
   useEffect(() => {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
@@ -393,6 +413,22 @@ export default function App() {
       setSelectedProjectId(projects[0].id);
     }
   }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    const parentPaths = parentTreePaths(relativePath);
+    if (parentPaths.length === 0) return;
+    setExpandedTreePaths((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const path of parentPaths) {
+        if (!next.has(path)) {
+          next.add(path);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [relativePath]);
 
   useEffect(() => {
     if (!dirtyNoteId) return;
@@ -524,6 +560,18 @@ export default function App() {
     setActiveView("markdown");
   }
 
+  function toggleTreeFolder(path: string) {
+    setExpandedTreePaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }
+
   async function saveMarkdown() {
     if (!vaultPath || !relativePath) return;
     let frontmatter: unknown;
@@ -610,16 +658,32 @@ export default function App() {
     setBudgetStatus(result);
   }
 
-  async function toggleQueue() {
+  async function saveMimoKey() {
+    const apiKey = mimoKeyInput.trim();
+    if (!vaultPath) {
+      setAppError({
+        title: "尚未选择 Vault",
+        detail: "MiMo key 会保存到当前 Vault 的 .secrets 目录。",
+        recovery: "先选择并初始化 Vault，再保存 API key。",
+      });
+      return;
+    }
+    if (!apiKey) {
+      setAppError({
+        title: "API Key 为空",
+        detail: "请输入 MiMo API key 后再保存。",
+        recovery: "从 MiMo 控制台复制 key，粘贴到设置页输入框。",
+      });
+      return;
+    }
     const result = await run(
-      () => (queueIsPaused ? commands.resumeInboxWorker(vaultPath) : commands.pauseInboxWorker(vaultPath)),
-      queueIsPaused ? "恢复后台 worker" : "暂停后台 worker",
-      queueIsPaused ? "后台 worker 已恢复" : "后台 worker 已暂停",
+      () => commands.saveMimoApiKey(vaultPath, apiKey),
+      "保存 MiMo API Key",
+      "MiMo API Key 已保存",
     );
     if (!result) return;
-    setWorkerStatus(result);
-    const nextQueue = await commands.getQueueStatus(vaultPath);
-    setQueueStatus(nextQueue);
+    setMimoStatus(result);
+    setMimoKeyInput("");
   }
 
   async function toggleInboxListener() {
@@ -633,6 +697,20 @@ export default function App() {
     setQueueStatus(result);
     const nextListener = await commands.getInboxListenerStatus(vaultPath);
     setListenerStatus(nextListener);
+  }
+
+  async function runWorkerControl() {
+    if (!vaultPath) return;
+    if (queueIsPaused) {
+      const resumed = await run(
+        () => commands.resumeInboxWorker(vaultPath),
+        "恢复后台 worker",
+        "后台 worker 已恢复",
+      );
+      if (!resumed) return;
+      setWorkerStatus(resumed);
+    }
+    await runInboxWorker();
   }
 
   async function runInboxWorker() {
@@ -973,7 +1051,7 @@ export default function App() {
 
   async function submitPrompt(prompt: string, scope: string) {
     const trimmed = prompt.trim();
-    if (!trimmed) return;
+    if (!trimmed || ragIsAsking) return;
     if (!vaultPath) {
       setAppError({
         title: "尚未选择 Vault",
@@ -982,14 +1060,19 @@ export default function App() {
       });
       return;
     }
-    const result = await run(
-      () => commands.askRag(vaultPath, trimmed, 6),
-      `${scope} RAG 问答`,
-      "RAG 已回答",
-    );
-    if (!result) return;
-    setRagAnswer(result);
-    setRagTrace(result.trace);
+    setRagIsAsking(true);
+    try {
+      const result = await run(
+        () => commands.askRag(vaultPath, trimmed, 6),
+        `${scope} RAG 问答`,
+        "RAG 已回答",
+      );
+      if (!result) return;
+      setRagAnswer(result);
+      setRagTrace(result.trace);
+    } finally {
+      setRagIsAsking(false);
+    }
   }
 
   function queueIssueMessage(item: QueueItem): string {
@@ -1053,28 +1136,6 @@ export default function App() {
             <strong>{moveLogs.filter((log) => log.status === "moved").length}</strong>
             <small>可回滚移动记录</small>
           </div>
-        </div>
-        <div className="recovery-action-row">
-          <button type="button" className="secondary-button" onClick={toggleInboxListener} disabled={!vaultPath}>
-            {listenerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
-            {listenerIsRunning ? "停止监听" : "启动监听"}
-          </button>
-          <button type="button" className="secondary-button" onClick={scanInboxQueue} disabled={!vaultPath}>
-            <RefreshCw size={16} aria-hidden="true" />
-            扫描入队
-          </button>
-          <button type="button" className="secondary-button" onClick={toggleQueue} disabled={!vaultPath}>
-            {queueIsPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-            {queueIsPaused ? "恢复 worker" : "暂停 worker"}
-          </button>
-          <button type="button" onClick={runInboxWorker} disabled={!vaultPath || queueIsPaused}>
-            <Zap size={16} aria-hidden="true" />
-            运行 worker
-          </button>
-          <button type="button" className="ghost-button" onClick={() => setStatus(`当前 open conflict：${conflicts.length}`)} disabled={!vaultPath}>
-            <Shield size={16} aria-hidden="true" />
-            查看冲突 {conflicts.length}
-          </button>
         </div>
         <div className="status-event-grid">
           <div>
@@ -1228,18 +1289,24 @@ export default function App() {
 
     return nodes.map((node) => {
       const isMarkdown = /\.(md|markdown)$/i.test(node.relativePath);
+      const isExpanded = node.isDir && expandedTreePaths.has(node.relativePath);
+      const hasChildren = node.children.length > 0;
       return (
         <div className="tree-node" key={node.relativePath || node.name}>
           <button
             type="button"
-            className={node.relativePath === relativePath ? "tree-row active" : "tree-row"}
+            className={[
+              "tree-row",
+              node.isDir ? "folder-row" : "",
+              node.relativePath === relativePath ? "active" : "",
+            ].filter(Boolean).join(" ")}
             style={{ paddingLeft: `${10 + depth * 14}px` }}
+            aria-expanded={node.isDir && hasChildren ? isExpanded : undefined}
+            title={node.relativePath}
             onClick={() => {
               if (node.isDir) {
-                const project = projects.find((entry) => entry.relativePath === node.relativePath);
-                if (project) {
-                  setSelectedProjectId(project.id);
-                  setActiveView("project");
+                if (hasChildren) {
+                  toggleTreeFolder(node.relativePath);
                 }
                 return;
               }
@@ -1248,11 +1315,17 @@ export default function App() {
               }
             }}
           >
-            {node.isDir ? <ChevronRight size={13} aria-hidden="true" /> : <span className="tree-indent" />}
-            {node.isDir ? <Folder size={15} aria-hidden="true" /> : fileIcon(node.relativePath)}
-            <span>{node.name}</span>
+            {node.isDir && hasChildren ? (
+              isExpanded ? <ChevronDown size={13} aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />
+            ) : (
+              <span className="tree-indent" />
+            )}
+            {node.isDir ? (
+              isExpanded ? <FolderOpen size={15} aria-hidden="true" /> : <Folder size={15} aria-hidden="true" />
+            ) : fileIcon(node.relativePath)}
+            <span className="tree-label">{node.name}</span>
           </button>
-          {node.isDir && node.children.length > 0 ? (
+          {node.isDir && hasChildren && isExpanded ? (
             <div className="tree-children">{renderVaultTree(node.children, depth + 1)}</div>
           ) : null}
         </div>
@@ -1403,6 +1476,7 @@ export default function App() {
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
+              if (ragIsAsking) return;
               void submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话");
               setValue("");
             }
@@ -1423,9 +1497,9 @@ export default function App() {
             <button type="button" className="chip-button">RAG · MiMo</button>
             <button type="button" className="chip-button api-connected">
               <Circle size={8} aria-hidden="true" />
-              {mimoStatus?.hasKey ? "MiMo ready" : "本地检索"}
+              {mimoKeyLabel}
             </button>
-            <button type="button" className="send-button" onClick={() => void submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话")}>
+            <button type="button" className="send-button" onClick={() => void submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话")} disabled={ragIsAsking}>
               <Send size={18} aria-hidden="true" />
             </button>
           </div>
@@ -1476,7 +1550,15 @@ export default function App() {
               <span>删除 {lastRun.deletedCount}</span>
             </div>
           ) : null}
-          {ragAnswer ? (
+          {ragIsAsking ? (
+            <div className="rag-answer rag-answer-loading">
+              <div className="rag-answer-meta">
+                <span>MiMo 正在回答</span>
+                <span>后台运行中</span>
+              </div>
+              <p>正在检索本地引用并等待 AI 响应。你可以继续浏览 Vault 或处理其他内容。</p>
+            </div>
+          ) : ragAnswer ? (
             <div className="rag-answer">
               <div className="rag-answer-meta">
                 <span>{ragAnswer.provider} · {ragAnswer.model}</span>
@@ -1687,6 +1769,10 @@ export default function App() {
             <Upload size={16} aria-hidden="true" />
             导入文件
           </button>
+          <button type="button" className="secondary-button" onClick={scanInboxQueue} disabled={!vaultPath}>
+            <RefreshCw size={16} aria-hidden="true" />
+            扫描入队
+          </button>
           <button type="button" className="secondary-button" onClick={planOrganize} disabled={!vaultPath}>
             <Sparkles size={16} aria-hidden="true" />
             生成计划
@@ -1695,17 +1781,13 @@ export default function App() {
             <Play size={16} aria-hidden="true" />
             运行整理
           </button>
-          <button type="button" className="secondary-button" onClick={runInboxWorker} disabled={!vaultPath || queueIsPaused}>
+          <button type="button" className="secondary-button" onClick={runWorkerControl} disabled={!vaultPath}>
             <Zap size={16} aria-hidden="true" />
-            运行后台 worker
+            {queueIsPaused ? "恢复并运行 worker" : "运行 worker"}
           </button>
           <button type="button" className="secondary-button" onClick={toggleInboxListener} disabled={!vaultPath}>
             {listenerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
             {listenerIsRunning ? "停止监听" : "启动监听"}
-          </button>
-          <button type="button" className="secondary-button" onClick={toggleQueue}>
-            {queueIsPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-            {queueIsPaused ? "恢复 worker" : "暂停 worker"}
           </button>
         </div>
 
@@ -2459,13 +2541,15 @@ export default function App() {
           <article className="settings-card">
             <h3><span>2</span> AI 与 API Key</h3>
             <label>Provider <select value="MiMo / OpenAI 兼容" onChange={() => undefined}><option>MiMo / OpenAI 兼容</option></select></label>
-            <label>API Key <input value={mimoStatus?.hasKey ? "已从安全位置读取" : "未配置"} readOnly aria-label="API Key 脱敏显示" /></label>
+            <label>API Key <input type="password" value={mimoKeyInput} onChange={(event) => setMimoKeyInput(event.target.value)} placeholder={mimoStatus?.hasKey ? "粘贴新 key 可覆盖当前安全文件" : "粘贴 MiMo API key"} aria-label="MiMo API Key" /></label>
             <div className="connection-row">
               <Circle size={8} aria-hidden="true" />
-              {mimoStatus?.hasKey ? `已就绪：${mimoStatus.keySource ?? "runtime"}` : "缺少 MIMO_API_KEY 或本地 .secrets key"}
+              {mimoSettingsSummary}
               <button type="button" className="ghost-button" onClick={() => vaultPath && refreshOperations(vaultPath)}>刷新</button>
             </div>
+            {mimoStatus?.keyMessage ? <p className="field-hint">{mimoStatus.keyMessage}</p> : null}
             <label className="toggle-line"><input type="checkbox" checked readOnly /> 启用 AI 功能</label>
+            <button type="button" className="ghost-button" onClick={saveMimoKey} disabled={!vaultPath || !mimoKeyInput.trim()}>保存 Key 到 Vault</button>
             <label>每月预算上限 <input type="number" value={settings.budgetMonthlyCents} onChange={(event) => setSettings((current) => ({ ...current, budgetMonthlyCents: Number(event.target.value) || 0 }))} /></label>
             <button type="button" className="ghost-button" onClick={saveBudget}>保存预算</button>
           </article>
@@ -2591,7 +2675,7 @@ export default function App() {
           <span>监听：{listenerStatus?.status ?? "未连接"} · 入队 {listenerStatus?.lastEnqueuedCount ?? 0}</span>
           <span>Worker：{workerStatus?.listener.status ?? "未连接"} · 冲突 {workerStatus?.conflicts ?? queueStatus?.conflicts ?? 0}</span>
           <span>预算：{budgetStatus ? formatBudget(budgetStatus.remainingCents) : "未连接"}</span>
-          <span>MiMo：{mimoStatus?.hasKey ? "ready" : "missing key"}</span>
+          <span>MiMo：{mimoKeyLabel}</span>
           <span>RAG：{ragStatus ? `${ragStatus.documentCount} 文档 / ${ragStatus.chunkCount} chunks` : "未连接"}</span>
           {initResult ? <span>Index 已初始化</span> : null}
           {usage?.isFallback ? <span>Usage fallback</span> : null}

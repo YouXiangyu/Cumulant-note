@@ -194,7 +194,10 @@ impl WorkerService {
         stable_wait_ms: u64,
         force_mock: bool,
     ) -> ServiceResult<WorkerItemResult> {
-        if item.kind != "inbox_file_changed" && item.kind != "file_changed" {
+        if !matches!(
+            item.kind.as_str(),
+            "inbox_file_changed" | "file_changed" | "imported_inbox_file"
+        ) {
             let message = format!("unsupported queue item kind: {}", item.kind);
             QueueService::finish(vault_path, item.id, "skipped", Some(&message))?;
             AuditService::record(
@@ -528,6 +531,40 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn imported_inbox_file_queue_items_are_processed_by_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        std::fs::write(temp.path().join(INBOX_DIR).join("a.md"), "hello").unwrap();
+        QueueService::enqueue(
+            temp.path().to_str().unwrap(),
+            QueueItemInput {
+                kind: "imported_inbox_file".to_string(),
+                relative_path: format!("{INBOX_DIR}/a.md"),
+                dedupe_key: Some(format!("import:{INBOX_DIR}/a.md")),
+                payload: Some(json!({"source": "import"})),
+                max_attempts: Some(3),
+                run_after: None,
+            },
+        )
+        .unwrap();
+        WorkerService::resume(temp.path().to_str().unwrap()).unwrap();
+
+        let run = WorkerService::drain(
+            temp.path().to_str().unwrap(),
+            WorkerRunOptions {
+                max_items: Some(1),
+                stable_wait_ms: Some(0),
+                force_mock: Some(true),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(run.processed, 1);
+        assert_eq!(run.failed, 1);
+        assert!(!run.items[0].message.contains("unsupported queue item kind"));
     }
 
     #[test]

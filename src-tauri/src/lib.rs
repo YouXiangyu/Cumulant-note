@@ -48,6 +48,7 @@ pub fn run() {
             commands::get_budget_status,
             commands::save_budget_settings,
             commands::get_mimo_status,
+            commands::save_mimo_api_key,
             commands::extract_with_mimo,
             commands::plan_inbox_item,
             commands::plan_ai_organize,

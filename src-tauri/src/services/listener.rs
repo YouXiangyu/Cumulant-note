@@ -85,12 +85,7 @@ impl ListenerService {
             return Ok(0);
         }
         let mut enqueued: usize = 0;
-        for entry in fs::read_dir(inbox)? {
-            let outcome = Self::process_path(vault_path, &root, entry?.path(), stable_wait_ms)?;
-            if outcome.status == "enqueued" {
-                enqueued += 1;
-            }
-        }
+        scan_directory(vault_path, &root, &inbox, stable_wait_ms, &mut enqueued)?;
         update_listener_event(vault_path, "manual inbox scan", enqueued as i64, None)?;
         Ok(enqueued)
     }
@@ -214,10 +209,44 @@ fn classify_candidate(root: &Path, path: &Path) -> ServiceResult<Candidate> {
     {
         return Ok(skip("listener ignores hidden or temporary files"));
     }
+    if !is_supported_listener_file(path) {
+        return Ok(skip("listener ignores unsupported file type"));
+    }
     Ok(Candidate {
         relative_path: Some(relative),
         skip_reason: None,
     })
+}
+
+fn scan_directory(
+    vault_path: &str,
+    root: &Path,
+    directory: &Path,
+    stable_wait_ms: u64,
+    enqueued: &mut usize,
+) -> ServiceResult<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            if path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .map(|name| is_blocked_segment(name) || is_temporary_or_hidden_name(name))
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            scan_directory(vault_path, root, &path, stable_wait_ms, enqueued)?;
+            continue;
+        }
+        let outcome = ListenerService::process_path(vault_path, root, path, stable_wait_ms)?;
+        if outcome.status == "enqueued" {
+            *enqueued += 1;
+        }
+    }
+    Ok(())
 }
 
 fn skip(reason: &str) -> Candidate {
@@ -256,6 +285,17 @@ fn is_temporary_or_hidden_name(name: &str) -> bool {
         || lower.ends_with(".crdownload")
         || lower.ends_with(".download")
         || lower.ends_with(".swp")
+}
+
+fn is_supported_listener_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "md" | "markdown" | "txt" | "mp3" | "wav" | "m4a" | "aac" | "png" | "jpg" | "jpeg"
+    )
 }
 
 fn is_file_stable(path: &Path, stable_wait_ms: u64) -> ServiceResult<bool> {
@@ -400,6 +440,30 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn manual_scan_recurses_and_skips_unsupported_files() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let inbox = temp.path().join(INBOX_DIR);
+        fs::create_dir_all(inbox.join("nested").join("deep")).unwrap();
+        fs::write(inbox.join("root.md"), "root").unwrap();
+        fs::write(inbox.join("nested").join("deep").join("note.txt"), "deep").unwrap();
+        fs::write(inbox.join("nested").join("slides.pdf"), "unsupported").unwrap();
+
+        let count = ListenerService::scan_inbox(temp.path().to_str().unwrap(), 0).unwrap();
+        let pending =
+            QueueService::list_by_status(temp.path().to_str().unwrap(), "pending").unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(pending.len(), 2);
+        assert!(pending
+            .iter()
+            .any(|item| item.relative_path == format!("{INBOX_DIR}/root.md")));
+        assert!(pending
+            .iter()
+            .any(|item| item.relative_path == format!("{INBOX_DIR}/nested/deep/note.txt")));
     }
 
     #[test]

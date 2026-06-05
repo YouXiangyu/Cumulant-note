@@ -78,7 +78,16 @@ pub struct MimoStatus {
     pub organize_model: String,
     pub has_key: bool,
     pub key_source: Option<String>,
+    pub key_has_bom: bool,
+    pub key_needs_cleanup: bool,
+    pub key_message: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MimoKeyInput {
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,18 +125,38 @@ impl MimoProvider {
     pub fn status(vault_path: &str) -> ServiceResult<MimoStatus> {
         let key = lookup_mimo_key(vault_path)?;
         let has_key = key.value.is_some();
+        let status = if has_key && key.had_bom {
+            "key_warning"
+        } else if has_key {
+            "key_found"
+        } else {
+            "missing_key"
+        };
         Ok(MimoStatus {
             provider: "mimo".to_string(),
             extract_model: MIMO_EXTRACT_MODEL.to_string(),
             organize_model: MIMO_ORGANIZE_MODEL.to_string(),
             has_key,
             key_source: key.source,
-            status: if has_key {
-                "ready".to_string()
-            } else {
-                "missing_key".to_string()
-            },
+            key_has_bom: key.had_bom,
+            key_needs_cleanup: key.had_bom,
+            key_message: key.message,
+            status: status.to_string(),
         })
+    }
+
+    pub fn save_api_key(vault_path: &str, input: MimoKeyInput) -> ServiceResult<MimoStatus> {
+        let (cleaned, _) = normalize_mimo_key(&input.api_key);
+        if cleaned.is_empty() {
+            return Err(ServiceError::InvalidState(
+                "MIMO_API_KEY must not be empty".to_string(),
+            ));
+        }
+        let root = canonical_vault_root(vault_path)?;
+        let secrets_dir = root.join(".secrets");
+        fs::create_dir_all(&secrets_dir)?;
+        fs::write(secrets_dir.join("mimo_api_key.txt"), cleaned.as_bytes())?;
+        Self::status(vault_path)
     }
 
     pub fn extract_file(
@@ -317,15 +346,19 @@ impl MimoProvider {
 struct KeyLookup {
     value: Option<String>,
     source: Option<String>,
+    had_bom: bool,
+    message: Option<String>,
 }
 
 fn lookup_mimo_key(vault_path: &str) -> ServiceResult<KeyLookup> {
     if let Ok(value) = env::var("MIMO_API_KEY") {
-        let trimmed = value.trim();
+        let (trimmed, had_bom) = normalize_mimo_key(&value);
         if !trimmed.is_empty() {
             return Ok(KeyLookup {
-                value: Some(trimmed.to_string()),
+                value: Some(trimmed),
                 source: Some("env:MIMO_API_KEY".to_string()),
+                had_bom,
+                message: key_message(had_bom, "env:MIMO_API_KEY"),
             });
         }
     }
@@ -333,11 +366,13 @@ fn lookup_mimo_key(vault_path: &str) -> ServiceResult<KeyLookup> {
     let local_key = root.join(".secrets").join("mimo_api_key.txt");
     if local_key.exists() {
         let value = fs::read_to_string(local_key)?;
-        let trimmed = value.trim();
+        let (trimmed, had_bom) = normalize_mimo_key(&value);
         if !trimmed.is_empty() {
             return Ok(KeyLookup {
-                value: Some(trimmed.to_string()),
+                value: Some(trimmed),
                 source: Some("vault:.secrets/mimo_api_key.txt".to_string()),
+                had_bom,
+                message: key_message(had_bom, "vault:.secrets/mimo_api_key.txt"),
             });
         }
     }
@@ -345,11 +380,13 @@ fn lookup_mimo_key(vault_path: &str) -> ServiceResult<KeyLookup> {
         let project_key = current_dir.join(".secrets").join("mimo_api_key.txt");
         if project_key.exists() {
             let value = fs::read_to_string(project_key)?;
-            let trimmed = value.trim();
+            let (trimmed, had_bom) = normalize_mimo_key(&value);
             if !trimmed.is_empty() {
                 return Ok(KeyLookup {
-                    value: Some(trimmed.to_string()),
+                    value: Some(trimmed),
                     source: Some("cwd:.secrets/mimo_api_key.txt".to_string()),
+                    had_bom,
+                    message: key_message(had_bom, "cwd:.secrets/mimo_api_key.txt"),
                 });
             }
         }
@@ -357,6 +394,21 @@ fn lookup_mimo_key(vault_path: &str) -> ServiceResult<KeyLookup> {
     Ok(KeyLookup {
         value: None,
         source: None,
+        had_bom: false,
+        message: None,
+    })
+}
+
+fn normalize_mimo_key(raw: &str) -> (String, bool) {
+    let trimmed = raw.trim();
+    let had_bom = trimmed.starts_with('\u{feff}');
+    let cleaned = trimmed.trim_start_matches('\u{feff}').trim().to_string();
+    (cleaned, had_bom)
+}
+
+fn key_message(had_bom: bool, source: &str) -> Option<String> {
+    had_bom.then(|| {
+        format!("{source} contains a UTF-8 BOM; runtime calls use a sanitized key. Save the key again to clean the file.")
     })
 }
 
@@ -724,6 +776,31 @@ mod tests {
         assert!(result.is_mock);
         assert_eq!(result.status, "missing_key");
         assert_eq!(result.model, MIMO_EXTRACT_MODEL);
+    }
+
+    #[test]
+    fn normalize_mimo_key_strips_utf8_bom() {
+        let (key, had_bom) = normalize_mimo_key("\u{feff}secret-key\n");
+
+        assert!(had_bom);
+        assert_eq!(key, "secret-key");
+    }
+
+    #[test]
+    fn save_api_key_writes_clean_secret_file() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+
+        MimoProvider::save_api_key(
+            temp.path().to_str().unwrap(),
+            MimoKeyInput {
+                api_key: "\u{feff}secret-key".to_string(),
+            },
+        )
+        .unwrap();
+
+        let bytes = fs::read(temp.path().join(".secrets").join("mimo_api_key.txt")).unwrap();
+        assert_eq!(bytes, b"secret-key");
     }
 
     #[test]

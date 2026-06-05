@@ -70,6 +70,7 @@ PRD 描述产品目标和产品边界：
 - 哪些是当前范围。
 - 哪些是非目标。
 - AI 自动化边界。
+- 动态归档模板 / Archive Map 等核心整理规则。
 - 前端愿景与后端真实能力如何分层。
 
 ## 5. Architecture
@@ -79,6 +80,7 @@ PRD 描述产品目标和产品边界：
 - Tauri 桌面应用分层。
 - Vault 与 `.thebrain` 的职责。
 - 收集箱自动整理 pipeline。
+- Archive Map 与整理决策上下文。
 - RAG pipeline。
 - Trace、audit、movement log。
 - 凭据和安全。
@@ -88,7 +90,7 @@ PRD 描述产品目标和产品边界：
 Roadmap 描述阶段目标：
 
 - v0.5 先收敛产品与文档。
-- v0.6 打磨收集箱自动整理。
+- v0.6 打磨收集箱自动整理，包括 Archive Map、worker、冲突恢复和批量整理。
 - v0.7 强化 RAG 和 NotebookLM 式问答。
 - v0.8 扩展 TODO、日程、人名档案和个人关系管理。
 - 后续再进入多格式、自动化和开源生态。

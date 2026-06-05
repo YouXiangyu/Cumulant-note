@@ -137,7 +137,10 @@ export interface MimoStatus extends CommandMeta {
   organizeModel: string;
   hasKey: boolean;
   keySource?: string;
-  status: "ready" | "missing_key" | string;
+  keyHasBom?: boolean;
+  keyNeedsCleanup?: boolean;
+  keyMessage?: string;
+  status: "key_found" | "key_warning" | "missing_key" | string;
 }
 
 export interface InboxImportResult extends CommandMeta {
@@ -564,6 +567,8 @@ function fallbackMimoStatus(reason: string): MimoStatus {
     organizeModel: "mimo-v2.5-pro",
     hasKey: false,
     status: "missing_key",
+    keyHasBom: false,
+    keyNeedsCleanup: false,
     isFallback: true,
     fallbackReason: reason,
   };
@@ -1161,6 +1166,12 @@ export const commands = {
     ).then(normalizeBudgetStatus),
   getMimoStatus: (vaultPath: string) =>
     invokeWithFallback<MimoStatus>("get_mimo_status", { vaultPath }, fallbackMimoStatus),
+  saveMimoApiKey: (vaultPath: string, apiKey: string) =>
+    invokeWithFallback<MimoStatus>(
+      "save_mimo_api_key",
+      { vaultPath, input: { apiKey } },
+      fallbackMimoStatus,
+    ),
   extractWithMimo: (vaultPath: string, relativePath: string, forceMock = false) =>
     invokeWithFallback<MimoExtractResult>(
       "extract_with_mimo",

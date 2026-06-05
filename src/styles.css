@@ -244,7 +244,7 @@ textarea:focus {
 .nav-item span,
 .project-link span,
 .conversation-list span,
-.tree-row span,
+.tree-row .tree-label,
 .vault-root-row span,
 .settings-link span {
   flex: 1;
@@ -312,13 +312,38 @@ textarea:focus {
 
 .tree-row {
   border-radius: 7px;
+  gap: 7px;
   min-height: 30px;
   padding-bottom: 5px;
   padding-top: 5px;
 }
 
+.tree-row svg,
 .tree-indent {
+  flex: 0 0 auto;
+}
+
+.tree-row > svg:first-child,
+.tree-indent {
+  width: 13px;
+}
+
+.tree-row .tree-indent {
   flex: 0 0 13px;
+  min-width: 13px;
+}
+
+.folder-row .tree-label {
+  font-weight: 650;
+}
+
+.tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-indent {
   height: 1px;
 }
 
@@ -645,6 +670,11 @@ textarea:focus {
   padding: 14px;
 }
 
+.rag-answer-loading {
+  background: #f8faf8;
+  border-color: #d9e4dc;
+}
+
 .rag-answer p {
   line-height: 1.65;
   margin: 0;
@@ -675,17 +705,36 @@ textarea:focus {
   text-align: left;
 }
 
+.rag-citations button:hover:not(:disabled) {
+  background: #f8fbf8;
+  border-color: #cfe1d4;
+  box-shadow: 0 8px 18px rgba(33, 74, 49, 0.08);
+  color: var(--text);
+}
+
+.rag-citations button:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(32, 115, 71, 0.12);
+  outline: none;
+}
+
 .rag-citations button strong {
   align-items: center;
-  background: var(--green);
+  background: var(--green-soft);
+  border: 1px solid #cfe5d5;
   border-radius: 7px;
-  color: #ffffff;
+  color: var(--green-deep);
   display: inline-flex;
   font-size: 12px;
   grid-row: span 3;
   justify-content: center;
   min-width: 34px;
   padding: 4px 6px;
+}
+
+.rag-citations button:hover:not(:disabled) strong {
+  background: #e0f0e6;
+  border-color: #bddcc7;
 }
 
 .rag-citations button span,
@@ -1923,6 +1972,13 @@ kbd {
 
 .connection-row button {
   margin-left: auto;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: -4px 0 0;
 }
 
 .template-settings {

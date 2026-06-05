@@ -9,6 +9,7 @@ use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +74,7 @@ impl MovementService {
         match fs::rename(&source_path, &target_path) {
             Ok(()) => {
                 append_ledger_entry(&root, &target, request.reason.as_deref())?;
+                let _ = prune_empty_inbox_parents(&root, source_path.parent());
                 log = Self::update_log(
                     vault_path,
                     log.id,
@@ -279,6 +281,35 @@ fn record_movement_conflict(
     );
 }
 
+fn prune_empty_inbox_parents(root: &Path, start: Option<&Path>) -> ServiceResult<()> {
+    let inbox_root = root.join(INBOX_DIR);
+    let Some(mut current) = start.map(Path::to_path_buf) else {
+        return Ok(());
+    };
+
+    loop {
+        if current == inbox_root || !current.starts_with(&inbox_root) {
+            break;
+        }
+        match fs::remove_dir(&current) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::DirectoryNotEmpty | ErrorKind::NotFound
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn append_ledger_entry(
     root: &Path,
     target_relative_path: &str,
@@ -374,6 +405,52 @@ mod tests {
             .join("nested")
             .join("a.md")
             .exists());
+    }
+
+    #[test]
+    fn move_prunes_empty_inbox_parent_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let source_dir = temp.path().join(INBOX_DIR).join("nested").join("deep");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("a.md"), "hello").unwrap();
+
+        MovementService::move_from_inbox(
+            temp.path().to_str().unwrap(),
+            MoveRequest {
+                source_relative_path: format!("{INBOX_DIR}/nested/deep/a.md"),
+                target_relative_path: "100-School/a.md".to_string(),
+                reason: Some("test".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(temp.path().join(INBOX_DIR).exists());
+        assert!(!source_dir.exists());
+        assert!(!temp.path().join(INBOX_DIR).join("nested").exists());
+    }
+
+    #[test]
+    fn move_keeps_non_empty_inbox_parent_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let source_dir = temp.path().join(INBOX_DIR).join("nested");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("a.md"), "hello").unwrap();
+        fs::write(source_dir.join("keep.md"), "keep").unwrap();
+
+        MovementService::move_from_inbox(
+            temp.path().to_str().unwrap(),
+            MoveRequest {
+                source_relative_path: format!("{INBOX_DIR}/nested/a.md"),
+                target_relative_path: "100-School/a.md".to_string(),
+                reason: Some("test".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(source_dir.exists());
+        assert!(source_dir.join("keep.md").exists());
     }
 
     #[test]

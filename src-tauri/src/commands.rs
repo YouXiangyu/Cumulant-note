@@ -1,5 +1,5 @@
 use crate::services::ai::{
-    MimoExtractInput, MimoExtractResult, MimoProvider, MimoStatus, OrganizeDecision,
+    MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
 use crate::services::audit::AuditService;
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
@@ -148,18 +148,19 @@ pub fn get_rag_index_status(vault_path: String) -> Result<RagIndexStatus, String
 }
 
 #[tauri::command]
-pub fn ask_rag(
+pub async fn ask_rag(
     vault_path: String,
     question: String,
     top_k: Option<usize>,
     conversation_id: Option<i64>,
 ) -> Result<RagAnswer, String> {
-    into_command_result(RagService::ask(
-        &vault_path,
-        &question,
-        top_k,
-        conversation_id,
-    ))
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        RagService::ask(&vault_path, &question, top_k, conversation_id)
+    });
+    match task.await {
+        Ok(result) => into_command_result(result),
+        Err(error) => Err(format!("RAG task failed: {error}")),
+    }
 }
 
 #[tauri::command]
@@ -356,6 +357,11 @@ pub fn save_budget_settings(vault_path: String, settings: Value) -> Result<Budge
 #[tauri::command]
 pub fn get_mimo_status(vault_path: String) -> Result<MimoStatus, String> {
     into_command_result(MimoProvider::status(&vault_path))
+}
+
+#[tauri::command]
+pub fn save_mimo_api_key(vault_path: String, input: MimoKeyInput) -> Result<MimoStatus, String> {
+    into_command_result(MimoProvider::save_api_key(&vault_path, input))
 }
 
 #[tauri::command]

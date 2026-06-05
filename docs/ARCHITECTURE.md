@@ -48,6 +48,7 @@ Vault/.secrets/
 新文件进入 000-收集箱
   -> 稳定等待与去重
   -> 内容抽取
+  -> 读取 Archive Map（Vault 目录结构归档模板）
   -> AI 分类与目标路径决策
   -> 冲突检查与用户问答
   -> 自动移动
@@ -56,6 +57,14 @@ Vault/.secrets/
   -> 生成 TODO / 日程 / 档案候选
   -> 可回滚
 ```
+
+Archive Map / 动态归档模板是目标 pipeline 中尚待实现的核心上下文服务。它与收集箱扫描不同：
+- 收集箱扫描负责发现 `000-收集箱/` 中等待处理的文件。
+- Archive Map 扫描负责读取正式 Vault 的目录结构，生成可归档目标地图，供 MiMo 做目标路径决策。
+
+Archive Map 应默认排除 `.thebrain/`、`.secrets/`、`.git/`、`node_modules/`、`target/`、`dist/` 等内部或工具目录，并完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为正式归档目标，也不提供归档分类结构。历史整理参考只能来自 `收集箱-已整理.md`、movement log 或 audit events 中的已完成移动记录。Archive Map 应保存为用户可读 Markdown，例如 `.thebrain/rules/archive-map.md`，SQLite 可以缓存目录索引、生成时间、命中统计和失效标记。
+
+AI 整理决策必须优先选择 Archive Map 中已有目录。只有当已有目录确实不适合时，才允许建议新建目录；新建目录、低置信度、目标冲突或分类边界不清必须进入 conflict/用户确认流程。手动“生成计划”和后台 worker 必须共用同一份 Archive Map。
 
 安全边界：
 
@@ -77,11 +86,11 @@ Vault/.secrets/
 后台 worker 与 MiMo 的关系：
 
 - MiMo 是 AI provider，负责文本抽取、图片/音频理解、整理建议和问答生成。
-- listener 是收集箱入口层，只监听当前 Vault 的 `000-收集箱/`，负责跳过 ledger、内部目录、隐藏/临时文件和目录项，并在文件稳定后用路径、mtime、size 签名去重入队。
+- listener 是收集箱入口层，递归监听和扫描当前 Vault 的 `000-收集箱/`，负责跳过 ledger、内部目录、隐藏/临时文件、目录项和不支持的文件类型，并在文件稳定后用路径、mtime、size 签名去重入队。
 - 后台 worker 是本地调度器，负责消费队列、稳定等待、调用 MiMo、检查预算、执行移动、写日志、处理重试和回滚。
-- 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态，并尝试附带相似冲突规则推荐。
-- 当前收集箱状态面板第一版汇总 listener、queue、worker、conflict 和 movement log 状态，展示最近事件、最近错误，并提供启动/停止监听、扫描入队、暂停/恢复/运行 worker、失败/冲突队列项单项重试或跳过、冲突规则处理和 movement log 单项回滚。
-- 只有 MiMo provider、listener、冲突规则服务或状态面板不等于已经有完整后台自动整理；长期可信自动整理仍需要更完整的 resident worker、长时间实机监听验证、批量策略、规则编辑/禁用、差异预览和批量恢复动作。
+- 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径，支持 listener 和导入产生的队列项；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态，并尝试附带相似冲突规则推荐。
+- 当前收集箱状态面板第一版汇总 listener、queue、worker、conflict 和 movement log 状态，展示最近事件、最近错误；主操作区提供导入、递归扫描入队、生成计划、运行整理、恢复并运行 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项重试或跳过、冲突规则处理和 movement log 单项回滚。
+- 只有 MiMo provider、listener、冲突规则服务或状态面板不等于已经有完整后台自动整理；长期可信自动整理仍需要 Archive Map、完整 resident worker、长时间实机监听验证、批量策略、规则编辑/禁用、差异预览和批量恢复动作。
 
 ## 4. Markdown 与元数据
 
@@ -172,10 +181,11 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 
 - `vault.rs`：Vault 初始化和路径安全。
 - `importer.rs`：导入到收集箱。
-- `listener.rs`：收集箱监听、稳定等待、跳过规则、去重入队和 listener 状态。
+- `listener.rs`：收集箱递归监听/扫描、稳定等待、跳过规则、去重入队和 listener 状态。
 - `ai.rs`：MiMo、抽取、整理决策和 fallback。
 - `worker.rs`：收集箱队列第一层手动消费、暂停恢复、可信移动、失败/冲突审计。
-- `movement.rs`：文件移动、ledger、audit、回滚。
+- `movement.rs`：文件移动、空目录清理、ledger、audit、回滚。
+- `archive_map.rs`（待实现）：扫描正式 Vault 目录结构，生成 Archive Map / 动态归档模板，供整理计划和 worker 共享。
 - `conflict_rules.rs`：冲突详情、用户答案规则 Markdown、规则索引、命中记录、相似规则推荐和确认应用。
 - `queue.rs`：队列状态、claim/retry、失败/冲突单项恢复和 listener 状态持久化。
 - `rag.rs`：RAG 索引和问答编排。
