@@ -4,7 +4,7 @@ use crate::services::vault::{
     canonical_vault_root, normalize_relative_path, INBOX_DIR, INTERNAL_DIR,
 };
 use crate::services::{ServiceError, ServiceResult};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,7 +50,50 @@ pub struct ArchiveMapSnapshot {
     pub file_count: usize,
     pub history_count: usize,
     pub directories: Vec<ArchiveMapDirectory>,
+    pub health: ArchiveMapHealth,
+    pub stale_directories: Vec<ArchiveMapStaleDirectory>,
+    pub top_hit_directories: Vec<ArchiveMapDirectoryHitStat>,
     pub markdown: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapHealth {
+    pub status: String,
+    pub is_stale: bool,
+    pub stale_reasons: Vec<String>,
+    pub generated_at: String,
+    pub age_seconds: Option<i64>,
+    pub markdown_exists: bool,
+    pub latest_run_status: String,
+    pub cached_directory_count: usize,
+    pub current_directory_count: usize,
+    pub stale_directory_count: usize,
+    pub added_directories: Vec<String>,
+    pub removed_directories: Vec<String>,
+    pub changed_directories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapStaleDirectory {
+    pub relative_path: String,
+    pub reason: String,
+    pub cached_file_count: Option<usize>,
+    pub current_file_count: Option<usize>,
+    pub historical_moves: usize,
+    pub last_moved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapDirectoryHitStat {
+    pub relative_path: String,
+    pub move_count: usize,
+    pub last_moved_at: Option<String>,
+    pub last_source_relative_path: Option<String>,
+    pub last_target_relative_path: Option<String>,
+    pub exists_in_current_map: bool,
 }
 
 pub struct ArchiveMapService;
@@ -209,6 +252,8 @@ fn snapshot_by_run_id(
         .finished_at
         .clone()
         .unwrap_or_else(|| run.started_at.clone());
+    let (health, stale_directories, top_hit_directories) =
+        analyze_snapshot(root, connection, &run, &directories, &generated_at)?;
     Ok(ArchiveMapSnapshot {
         markdown_path: run.markdown_path.clone(),
         directory_count: run.directory_count as usize,
@@ -216,9 +261,263 @@ fn snapshot_by_run_id(
         history_count: run.history_count as usize,
         generated_at,
         directories,
+        health,
+        stale_directories,
+        top_hit_directories,
         markdown,
         run,
     })
+}
+
+fn analyze_snapshot(
+    root: &Path,
+    connection: &Connection,
+    run: &ArchiveMapRun,
+    cached_directories: &[ArchiveMapDirectory],
+    generated_at: &str,
+) -> ServiceResult<(
+    ArchiveMapHealth,
+    Vec<ArchiveMapStaleDirectory>,
+    Vec<ArchiveMapDirectoryHitStat>,
+)> {
+    let current_directories = scan_formal_directories(root)?;
+    let cached_map = cached_directories
+        .iter()
+        .map(|directory| (directory.relative_path.clone(), directory))
+        .collect::<BTreeMap<_, _>>();
+    let current_map = current_directories
+        .iter()
+        .map(|directory| (directory.relative_path.clone(), directory))
+        .collect::<BTreeMap<_, _>>();
+    let current_paths = current_map.keys().cloned().collect::<BTreeSet<_>>();
+    let top_hit_directories = read_movement_hit_stats(connection, &current_paths)?;
+
+    let mut added_directories = Vec::new();
+    let mut removed_directories = Vec::new();
+    let mut changed_directories = Vec::new();
+    let mut stale_directories = Vec::new();
+    let mut reported = BTreeSet::new();
+
+    for (relative_path, current) in &current_map {
+        if !cached_map.contains_key(relative_path) {
+            added_directories.push(relative_path.clone());
+            reported.insert(relative_path.clone());
+            stale_directories.push(ArchiveMapStaleDirectory {
+                relative_path: relative_path.clone(),
+                reason: "current formal directory is not cached; rebuild archive map".to_string(),
+                cached_file_count: None,
+                current_file_count: Some(current.file_count),
+                historical_moves: 0,
+                last_moved_at: None,
+            });
+        }
+    }
+
+    for (relative_path, cached) in &cached_map {
+        match current_map.get(relative_path) {
+            Some(current)
+                if cached.file_count != current.file_count
+                    || cached.child_count != current.child_count =>
+            {
+                changed_directories.push(relative_path.clone());
+                reported.insert(relative_path.clone());
+                stale_directories.push(ArchiveMapStaleDirectory {
+                    relative_path: relative_path.clone(),
+                    reason: "directory file or child count changed since last rebuild".to_string(),
+                    cached_file_count: Some(cached.file_count),
+                    current_file_count: Some(current.file_count),
+                    historical_moves: cached.historical_moves,
+                    last_moved_at: top_hit_directories
+                        .iter()
+                        .find(|stat| stat.relative_path == *relative_path)
+                        .and_then(|stat| stat.last_moved_at.clone()),
+                });
+            }
+            Some(_) => {}
+            None => {
+                removed_directories.push(relative_path.clone());
+                reported.insert(relative_path.clone());
+                stale_directories.push(ArchiveMapStaleDirectory {
+                    relative_path: relative_path.clone(),
+                    reason: "cached directory no longer exists in the formal Vault tree"
+                        .to_string(),
+                    cached_file_count: Some(cached.file_count),
+                    current_file_count: None,
+                    historical_moves: cached.historical_moves,
+                    last_moved_at: top_hit_directories
+                        .iter()
+                        .find(|stat| stat.relative_path == *relative_path)
+                        .and_then(|stat| stat.last_moved_at.clone()),
+                });
+            }
+        }
+    }
+
+    for stat in top_hit_directories
+        .iter()
+        .filter(|stat| !stat.exists_in_current_map)
+    {
+        if reported.insert(stat.relative_path.clone()) {
+            stale_directories.push(ArchiveMapStaleDirectory {
+                relative_path: stat.relative_path.clone(),
+                reason: "movement history points to a directory outside the current formal map"
+                    .to_string(),
+                cached_file_count: cached_map
+                    .get(&stat.relative_path)
+                    .map(|directory| directory.file_count),
+                current_file_count: None,
+                historical_moves: stat.move_count,
+                last_moved_at: stat.last_moved_at.clone(),
+            });
+        }
+    }
+
+    added_directories.sort();
+    removed_directories.sort();
+    changed_directories.sort();
+    stale_directories.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+    let markdown_exists = root.join(&run.markdown_path).is_file();
+    let mut stale_reasons = Vec::new();
+    if !markdown_exists {
+        stale_reasons.push("archive map markdown file is missing".to_string());
+    }
+    if !added_directories.is_empty() {
+        stale_reasons.push(format!(
+            "{} formal directories were added after the last rebuild",
+            added_directories.len()
+        ));
+    }
+    if !removed_directories.is_empty() {
+        stale_reasons.push(format!(
+            "{} cached directories no longer exist",
+            removed_directories.len()
+        ));
+    }
+    if !changed_directories.is_empty() {
+        stale_reasons.push(format!(
+            "{} cached directories changed file or child counts",
+            changed_directories.len()
+        ));
+    }
+    let stale_history_count = top_hit_directories
+        .iter()
+        .filter(|stat| !stat.exists_in_current_map)
+        .count();
+    if stale_history_count > 0 {
+        stale_reasons.push(format!(
+            "{stale_history_count} historical target directories are outside the current map"
+        ));
+    }
+
+    let is_stale = !stale_reasons.is_empty();
+    let status = if run.status != "ok" {
+        "failed"
+    } else if is_stale {
+        "stale"
+    } else if current_directories.is_empty() {
+        "empty"
+    } else {
+        "ok"
+    }
+    .to_string();
+
+    Ok((
+        ArchiveMapHealth {
+            status,
+            is_stale,
+            stale_reasons,
+            generated_at: generated_at.to_string(),
+            age_seconds: age_seconds(generated_at),
+            markdown_exists,
+            latest_run_status: run.status.clone(),
+            cached_directory_count: cached_directories.len(),
+            current_directory_count: current_directories.len(),
+            stale_directory_count: stale_directories.len(),
+            added_directories,
+            removed_directories,
+            changed_directories,
+        },
+        stale_directories,
+        top_hit_directories,
+    ))
+}
+
+#[derive(Debug, Default)]
+struct HitStatAccumulator {
+    move_count: usize,
+    last_moved_at: Option<String>,
+    last_source_relative_path: Option<String>,
+    last_target_relative_path: Option<String>,
+}
+
+fn read_movement_hit_stats(
+    connection: &Connection,
+    current_paths: &BTreeSet<String>,
+) -> ServiceResult<Vec<ArchiveMapDirectoryHitStat>> {
+    let mut statement = connection.prepare(
+        "SELECT source_relative_path, target_relative_path, COALESCE(moved_at, created_at)
+         FROM movement_log
+         WHERE status = 'moved'
+         ORDER BY COALESCE(moved_at, created_at), id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut stats = BTreeMap::<String, HitStatAccumulator>::new();
+    for row in rows {
+        let (source_relative_path, target_relative_path, moved_at) = row?;
+        if let Some(parent) = parent_dir(&target_relative_path) {
+            if !is_formal_relative_dir(&parent) {
+                continue;
+            }
+            let stat = stats.entry(parent).or_default();
+            stat.move_count += 1;
+            let is_newer = stat
+                .last_moved_at
+                .as_deref()
+                .map(|current| moved_at.as_str() >= current)
+                .unwrap_or(true);
+            if is_newer {
+                stat.last_moved_at = Some(moved_at);
+                stat.last_source_relative_path = Some(source_relative_path);
+                stat.last_target_relative_path = Some(target_relative_path);
+            }
+        }
+    }
+
+    let mut result = stats
+        .into_iter()
+        .map(|(relative_path, stat)| ArchiveMapDirectoryHitStat {
+            exists_in_current_map: current_paths.contains(&relative_path),
+            relative_path,
+            move_count: stat.move_count,
+            last_moved_at: stat.last_moved_at,
+            last_source_relative_path: stat.last_source_relative_path,
+            last_target_relative_path: stat.last_target_relative_path,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|left, right| {
+        right
+            .move_count
+            .cmp(&left.move_count)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    Ok(result)
+}
+
+fn age_seconds(generated_at: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(generated_at)
+        .ok()
+        .map(|timestamp| {
+            (Utc::now() - timestamp.with_timezone(&Utc))
+                .num_seconds()
+                .max(0)
+        })
 }
 
 fn run_by_id(connection: &Connection, run_id: i64) -> ServiceResult<ArchiveMapRun> {
@@ -510,6 +809,7 @@ fn escape_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::movement::{MoveRequest, MovementService};
     use crate::services::vault::{VaultService, LEDGER_FILE};
 
     #[test]
@@ -576,5 +876,85 @@ mod tests {
         assert_eq!(ai_dir.historical_moves, 1);
         assert!(snapshot.markdown.contains("Historical Targets"));
         assert!(snapshot.markdown.contains("100-School/AI"));
+    }
+
+    #[test]
+    fn archive_map_health_reports_stale_when_formal_directories_change() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+
+        let initial = ArchiveMapService::rebuild(temp.path().to_str().unwrap()).unwrap();
+        assert_eq!(initial.health.status, "ok");
+        assert!(!initial.health.is_stale);
+
+        fs::create_dir_all(temp.path().join("200-Projects")).unwrap();
+        fs::remove_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+
+        let latest = ArchiveMapService::latest(temp.path().to_str().unwrap())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(latest.health.status, "stale");
+        assert!(latest.health.is_stale);
+        assert!(latest
+            .health
+            .added_directories
+            .contains(&"200-Projects".to_string()));
+        assert!(latest
+            .health
+            .removed_directories
+            .contains(&"100-School/AI".to_string()));
+        assert!(latest
+            .stale_directories
+            .iter()
+            .any(|directory| directory.relative_path == "100-School/AI"));
+        assert!(latest
+            .stale_directories
+            .iter()
+            .any(|directory| directory.relative_path == "200-Projects"));
+    }
+
+    #[test]
+    fn archive_map_hit_stats_group_moved_logs_by_target_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+        fs::create_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+        ArchiveMapService::rebuild(vault_path).unwrap();
+        fs::write(temp.path().join(INBOX_DIR).join("lecture.md"), "notes").unwrap();
+
+        MovementService::move_from_inbox(
+            vault_path,
+            MoveRequest {
+                source_relative_path: format!("{INBOX_DIR}/lecture.md"),
+                target_relative_path: "100-School/AI/lecture.md".to_string(),
+                reason: Some("test move".to_string()),
+            },
+        )
+        .unwrap();
+
+        let latest = ArchiveMapService::latest(vault_path).unwrap().unwrap();
+        let hit = latest
+            .top_hit_directories
+            .iter()
+            .find(|directory| directory.relative_path == "100-School/AI")
+            .unwrap();
+
+        assert_eq!(hit.move_count, 1);
+        assert!(hit.exists_in_current_map);
+        assert_eq!(
+            hit.last_source_relative_path.as_deref(),
+            Some("000-收集箱/lecture.md")
+        );
+        assert_eq!(
+            hit.last_target_relative_path.as_deref(),
+            Some("100-School/AI/lecture.md")
+        );
+        assert_eq!(latest.health.status, "stale");
+        assert!(latest
+            .health
+            .changed_directories
+            .contains(&"100-School/AI".to_string()));
     }
 }

@@ -197,6 +197,40 @@ export interface ArchiveMapRun {
   error?: string;
 }
 
+export interface ArchiveMapHealth {
+  status: "ok" | "stale" | "empty" | "failed" | "fallback" | string;
+  isStale: boolean;
+  staleReasons: string[];
+  generatedAt: string;
+  ageSeconds?: number;
+  markdownExists: boolean;
+  latestRunStatus: string;
+  cachedDirectoryCount: number;
+  currentDirectoryCount: number;
+  staleDirectoryCount: number;
+  addedDirectories: string[];
+  removedDirectories: string[];
+  changedDirectories: string[];
+}
+
+export interface ArchiveMapStaleDirectory {
+  relativePath: string;
+  reason: string;
+  cachedFileCount?: number;
+  currentFileCount?: number;
+  historicalMoves: number;
+  lastMovedAt?: string;
+}
+
+export interface ArchiveMapDirectoryHitStat {
+  relativePath: string;
+  moveCount: number;
+  lastMovedAt?: string;
+  lastSourceRelativePath?: string;
+  lastTargetRelativePath?: string;
+  existsInCurrentMap: boolean;
+}
+
 export interface ArchiveMapSnapshot extends CommandMeta {
   run: ArchiveMapRun;
   generatedAt: string;
@@ -205,6 +239,9 @@ export interface ArchiveMapSnapshot extends CommandMeta {
   fileCount: number;
   historyCount: number;
   directories: ArchiveMapDirectory[];
+  health: ArchiveMapHealth;
+  staleDirectories: ArchiveMapStaleDirectory[];
+  topHitDirectories: ArchiveMapDirectoryHitStat[];
   markdown: string;
 }
 
@@ -961,6 +998,23 @@ function fallbackArchiveMap(reason: string): ArchiveMapSnapshot {
     fileCount: 0,
     historyCount: 0,
     directories: [],
+    health: {
+      status: "fallback",
+      isStale: false,
+      staleReasons: [reason],
+      generatedAt: nowIso(),
+      ageSeconds: 0,
+      markdownExists: false,
+      latestRunStatus: "fallback",
+      cachedDirectoryCount: 0,
+      currentDirectoryCount: 0,
+      staleDirectoryCount: 0,
+      addedDirectories: [],
+      removedDirectories: [],
+      changedDirectories: [],
+    },
+    staleDirectories: [],
+    topHitDirectories: [],
     markdown: "",
     isFallback: true,
     fallbackReason: reason,

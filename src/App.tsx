@@ -306,6 +306,17 @@ function queueStateLabel(state?: QueueStatus["state"]): string {
   return state ? labels[state] : "未连接";
 }
 
+function archiveMapHealthLabel(status?: string): string {
+  const labels: Record<string, string> = {
+    ok: "健康",
+    stale: "需重建",
+    empty: "空地图",
+    failed: "失败",
+    fallback: "降级",
+  };
+  return status ? labels[status] ?? status : "未生成";
+}
+
 function pageTitle(view: ViewId): { title: string; subtitle: string } {
   const titles: Record<ViewId, { title: string; subtitle: string }> = {
     dashboard: { title: "主仪表盘", subtitle: "本地优先 · 自动整理 · AI 助手" },
@@ -1902,6 +1913,13 @@ export default function App() {
             <strong>{moveLogs.filter((log) => log.status === "moved").length}</strong>
             <small>可回滚移动记录</small>
           </div>
+          <div>
+            <span>Archive Map</span>
+            <strong>{archiveMapHealthLabel(archiveMap?.health?.status ?? archiveMap?.run.status)}</strong>
+            <small>
+              目录 {archiveMap?.health?.currentDirectoryCount ?? archiveMap?.directoryCount ?? 0} · stale {archiveMap?.health?.staleDirectoryCount ?? 0} · 历史归档命中 {(archiveMap?.topHitDirectories ?? []).reduce((total, item) => total + item.moveCount, 0)}
+            </small>
+          </div>
         </div>
         <div className="status-event-grid">
           <div>
@@ -2962,26 +2980,62 @@ export default function App() {
               <div className="archive-map-summary">
                 <div><strong>{archiveMap?.directoryCount ?? 0}</strong><span>正式目录</span></div>
                 <div><strong>{archiveMap?.fileCount ?? 0}</strong><span>样本文件</span></div>
-                <div><strong>{archiveMap?.historyCount ?? 0}</strong><span>历史命中</span></div>
+                <div><strong>{archiveMap?.historyCount ?? 0}</strong><span>历史引用</span></div>
               </div>
+              {archiveMap ? (
+                <div className={archiveMap.health.isStale ? "archive-map-health is-stale" : "archive-map-health"}>
+                  <strong>{archiveMapHealthLabel(archiveMap.health.status)}</strong>
+                  <span>
+                    缓存 {archiveMap.health.cachedDirectoryCount} · 当前 {archiveMap.health.currentDirectoryCount} · stale {archiveMap.health.staleDirectoryCount}
+                  </span>
+                  {archiveMap.health.staleReasons.length > 0 ? (
+                    <small>{archiveMap.health.staleReasons.slice(0, 2).join(" · ")}</small>
+                  ) : (
+                    <small>地图与当前正式 Vault 目录一致</small>
+                  )}
+                </div>
+              ) : null}
               <div className="archive-map-list">
-                {(archiveMap?.directories ?? []).slice(0, 5).map((directory) => (
-                  <button
-                    type="button"
-                    key={directory.relativePath}
-                    onClick={() => setTargetMovePath(`${directory.relativePath}/${selectedInboxPath.split("/").pop() || "新文件.md"}`)}
-                  >
-                    <span>{directory.relativePath}</span>
-                    <small>
-                      {directory.fileCount} files · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
-                    </small>
-                  </button>
-                ))}
+                {(archiveMap?.directories ?? []).slice(0, 5).map((directory) => {
+                  const hitStat = archiveMap?.topHitDirectories.find((item) => item.relativePath === directory.relativePath);
+                  return (
+                    <button
+                      type="button"
+                      key={directory.relativePath}
+                      onClick={() => setTargetMovePath(`${directory.relativePath}/${selectedInboxPath.split("/").pop() || "新文件.md"}`)}
+                    >
+                      <span>{directory.relativePath}</span>
+                      <small>
+                        {directory.fileCount} files · 历史引用 {hitStat?.moveCount ?? directory.historicalMoves} · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
+                      </small>
+                    </button>
+                  );
+                })}
                 {archiveMap && archiveMap.directories.length === 0 ? (
                   <p className="empty-state">还没有正式归档目录</p>
                 ) : null}
                 {!archiveMap ? <p className="empty-state">选择并初始化 Vault 后生成归档地图</p> : null}
               </div>
+              {archiveMap?.topHitDirectories.length ? (
+                <div className="archive-map-hit-list">
+                  <span>历史归档命中</span>
+                  {archiveMap.topHitDirectories.slice(0, 3).map((directory) => (
+                    <small key={directory.relativePath}>
+                      {directory.relativePath} · {directory.moveCount} 次{directory.existsInCurrentMap ? "" : " · 不在当前地图"}
+                    </small>
+                  ))}
+                </div>
+              ) : null}
+              {archiveMap?.staleDirectories.length ? (
+                <div className="archive-map-stale-list">
+                  <span>需关注目录</span>
+                  {archiveMap.staleDirectories.slice(0, 3).map((directory) => (
+                    <small key={`${directory.relativePath}-${directory.reason}`}>
+                      {directory.relativePath} · {directory.reason}
+                    </small>
+                  ))}
+                </div>
+              ) : null}
               <small>{archiveMap?.markdownPath ?? ".thebrain/rules/archive-map.md"}</small>
               {archiveMap?.isFallback ? <small>{archiveMap.fallbackReason}</small> : null}
             </section>

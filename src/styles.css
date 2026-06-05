@@ -2448,6 +2448,51 @@ kbd {
   font-size: 12px;
 }
 
+.archive-map-health,
+.archive-map-hit-list,
+.archive-map-stale-list {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.archive-map-health.is-stale {
+  background: #fff8e6;
+  border-color: #ead49a;
+}
+
+.archive-map-health strong,
+.archive-map-health span,
+.archive-map-health small,
+.archive-map-hit-list span,
+.archive-map-hit-list small,
+.archive-map-stale-list span,
+.archive-map-stale-list small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-map-health span,
+.archive-map-health small,
+.archive-map-hit-list small,
+.archive-map-stale-list small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.archive-map-hit-list span,
+.archive-map-stale-list span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .archive-map-list {
   display: flex;
   flex-direction: column;
