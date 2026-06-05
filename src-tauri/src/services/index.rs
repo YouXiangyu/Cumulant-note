@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-            VALUES ('schema_version', '6', ?1)
+            VALUES ('schema_version', '7', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 6;
+            PRAGMA user_version = 7;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -229,6 +229,46 @@ impl IndexService {
             );
             CREATE INDEX IF NOT EXISTS idx_action_candidates_status
                 ON action_candidates(status);
+
+            CREATE TABLE IF NOT EXISTS todo_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_candidate_id INTEGER UNIQUE,
+                source_relative_path TEXT,
+                title TEXT NOT NULL,
+                notes TEXT,
+                due_at TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                cancelled_at TEXT,
+                FOREIGN KEY(source_candidate_id) REFERENCES action_candidates(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_todo_items_status_due
+                ON todo_items(status, due_at, created_at);
+
+            CREATE TABLE IF NOT EXISTS schedule_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_candidate_id INTEGER UNIQUE,
+                source_relative_path TEXT,
+                title TEXT NOT NULL,
+                notes TEXT,
+                starts_at TEXT,
+                ends_at TEXT,
+                all_day INTEGER NOT NULL DEFAULT 0,
+                timezone TEXT,
+                location TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                cancelled_at TEXT,
+                FOREIGN KEY(source_candidate_id) REFERENCES action_candidates(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_schedule_items_status_starts
+                ON schedule_items(status, starts_at, created_at);
 
             CREATE TABLE IF NOT EXISTS sticky_notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -436,6 +476,8 @@ mod tests {
                     'archive_map_runs',
                     'archive_map_entries',
                     'action_candidates',
+                    'todo_items',
+                    'schedule_items',
                     'sticky_notes',
                     'rag_documents',
                     'rag_chunks',
@@ -450,6 +492,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 24);
+        assert_eq!(table_count, 26);
     }
 }

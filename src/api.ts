@@ -476,6 +476,38 @@ export interface TodoScheduleCandidate extends CommandMeta {
   status: "pending" | "confirmed" | "dismissed";
 }
 
+export type TodoScheduleItemKind = "todo" | "schedule";
+export type TodoScheduleItemStatus = "open" | "scheduled" | "completed" | "cancelled" | "archived" | string;
+
+export interface TodoScheduleItem extends CommandMeta {
+  id: string;
+  kind: TodoScheduleItemKind;
+  sourceCandidateId?: string;
+  sourceRelativePath?: string;
+  title: string;
+  notes?: string;
+  dueAt?: string;
+  startsAt?: string;
+  endsAt?: string;
+  allDay?: boolean;
+  timezone?: string;
+  location?: string;
+  payload?: Record<string, unknown>;
+  status: TodoScheduleItemStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  cancelledAt?: string;
+}
+
+export interface CandidatePromotionResult extends CommandMeta {
+  candidate: TodoScheduleCandidate;
+  todoItem?: TodoScheduleItem;
+  scheduleItem?: TodoScheduleItem;
+  item?: TodoScheduleItem;
+  status?: string;
+}
+
 export interface StickyNote extends CommandMeta {
   id: string;
   title: string;
@@ -529,6 +561,14 @@ export interface WorkspaceCandidateInsights extends CommandMeta {
   total: number;
 }
 
+export interface WorkspaceActionItemInsights extends CommandMeta {
+  openTodo: number;
+  scheduled: number;
+  completed: number;
+  cancelled: number;
+  total: number;
+}
+
 export interface WorkspaceMovementInsights extends CommandMeta {
   completed: number;
   rolledBack: number;
@@ -557,6 +597,7 @@ export interface WorkspaceInsights extends CommandMeta {
   recentFiles: RecentFileSummary[];
   rag: WorkspaceRagInsights;
   candidates: WorkspaceCandidateInsights;
+  actionItems: WorkspaceActionItemInsights;
   movement: WorkspaceMovementInsights;
   audit: WorkspaceAuditInsights;
   sticky: WorkspaceStickyInsights;
@@ -1077,6 +1118,15 @@ function fallbackWorkspaceInsights(reason: string): WorkspaceInsights {
       isFallback: true,
       fallbackReason: reason,
     },
+    actionItems: {
+      openTodo: 0,
+      scheduled: 0,
+      completed: 0,
+      cancelled: 0,
+      total: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
     movement: {
       completed: 0,
       rolledBack: 0,
@@ -1123,6 +1173,7 @@ function normalizeWorkspaceInsights(raw: any): WorkspaceInsights {
   const vault = raw?.vault ?? {};
   const rag = raw?.rag ?? {};
   const candidates = raw?.candidates ?? {};
+  const actionItems = raw?.actionItems ?? raw?.action_items ?? {};
   const movement = raw?.movement ?? {};
   const audit = raw?.audit ?? {};
   const sticky = raw?.sticky ?? {};
@@ -1176,6 +1227,15 @@ function normalizeWorkspaceInsights(raw: any): WorkspaceInsights {
       total: toNumber(candidates.total),
       isFallback: candidates.isFallback ?? candidates.is_fallback ?? isFallback,
       fallbackReason: candidates.fallbackReason ?? candidates.fallback_reason ?? fallbackReason,
+    },
+    actionItems: {
+      openTodo: toNumber(actionItems.openTodo ?? actionItems.open_todo),
+      scheduled: toNumber(actionItems.scheduled),
+      completed: toNumber(actionItems.completed),
+      cancelled: toNumber(actionItems.cancelled),
+      total: toNumber(actionItems.total),
+      isFallback: actionItems.isFallback ?? actionItems.is_fallback ?? isFallback,
+      fallbackReason: actionItems.fallbackReason ?? actionItems.fallback_reason ?? fallbackReason,
     },
     movement: {
       completed: toNumber(movement.completed),
@@ -1490,6 +1550,87 @@ function normalizeCandidate(raw: any): TodoScheduleCandidate {
     dueAt: raw.payload?.dueAt ?? raw.payload?.date,
     confidence: raw.payload?.confidence ?? 0.5,
     status: raw.status === "rejected" ? "dismissed" : raw.status,
+  };
+}
+
+function normalizeTodoItem(raw: any): TodoScheduleItem {
+  if (!raw || typeof raw !== "object") {
+    return raw as TodoScheduleItem;
+  }
+  return {
+    id: String(raw.id ?? ""),
+    kind: "todo",
+    sourceCandidateId:
+      raw.sourceCandidateId !== undefined || raw.source_candidate_id !== undefined
+        ? String(raw.sourceCandidateId ?? raw.source_candidate_id)
+        : undefined,
+    sourceRelativePath: raw.sourceRelativePath ?? raw.source_relative_path,
+    title: String(raw.title ?? "未命名 TODO"),
+    notes: raw.notes,
+    dueAt: raw.dueAt ?? raw.due_at,
+    payload: raw.payload ?? {},
+    status: raw.status ?? "open",
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? nowIso(),
+    completedAt: raw.completedAt ?? raw.completed_at,
+    cancelledAt: raw.cancelledAt ?? raw.cancelled_at,
+    isFallback: raw.isFallback ?? raw.is_fallback,
+    fallbackReason: raw.fallbackReason ?? raw.fallback_reason,
+  };
+}
+
+function normalizeScheduleItem(raw: any): TodoScheduleItem {
+  if (!raw || typeof raw !== "object") {
+    return raw as TodoScheduleItem;
+  }
+  return {
+    id: String(raw.id ?? ""),
+    kind: "schedule",
+    sourceCandidateId:
+      raw.sourceCandidateId !== undefined || raw.source_candidate_id !== undefined
+        ? String(raw.sourceCandidateId ?? raw.source_candidate_id)
+        : undefined,
+    sourceRelativePath: raw.sourceRelativePath ?? raw.source_relative_path,
+    title: String(raw.title ?? "未命名日程"),
+    notes: raw.notes,
+    startsAt: raw.startsAt ?? raw.starts_at,
+    endsAt: raw.endsAt ?? raw.ends_at,
+    allDay: Boolean(raw.allDay ?? raw.all_day),
+    timezone: raw.timezone,
+    location: raw.location,
+    payload: raw.payload ?? {},
+    status: raw.status ?? "scheduled",
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? nowIso(),
+    completedAt: raw.completedAt ?? raw.completed_at,
+    cancelledAt: raw.cancelledAt ?? raw.cancelled_at,
+    isFallback: raw.isFallback ?? raw.is_fallback,
+    fallbackReason: raw.fallbackReason ?? raw.fallback_reason,
+  };
+}
+
+function sortTodoScheduleItems(items: TodoScheduleItem[]): TodoScheduleItem[] {
+  return [...items].sort((left, right) => {
+    const leftDate = left.startsAt ?? left.dueAt ?? left.createdAt;
+    const rightDate = right.startsAt ?? right.dueAt ?? right.createdAt;
+    return leftDate.localeCompare(rightDate) || left.title.localeCompare(right.title);
+  });
+}
+
+function normalizePromotionResult(raw: any): CandidatePromotionResult {
+  const candidate = normalizeCandidate(raw?.candidate ?? {});
+  const rawTodoItem = raw?.todoItem ?? raw?.todo_item;
+  const rawScheduleItem = raw?.scheduleItem ?? raw?.schedule_item;
+  const todoItem = rawTodoItem ? normalizeTodoItem(rawTodoItem) : undefined;
+  const scheduleItem = rawScheduleItem ? normalizeScheduleItem(rawScheduleItem) : undefined;
+  return {
+    candidate,
+    todoItem,
+    scheduleItem,
+    item: todoItem ?? scheduleItem,
+    status: raw?.status,
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
   };
 }
 
@@ -1990,6 +2131,44 @@ export const commands = {
       { vaultPath },
       fallbackTodoScheduleCandidates,
     ).then((items) => items.map(normalizeCandidate)),
+  listTodoItems: (vaultPath: string, includeCompleted = false) =>
+    invokeWithFallback<any[]>(
+      "list_todo_items",
+      { vaultPath, includeCompleted },
+      () => [],
+    ).then((items) => items.map(normalizeTodoItem)),
+  listScheduleItems: (vaultPath: string, includeCompleted = false) =>
+    invokeWithFallback<any[]>(
+      "list_schedule_items",
+      { vaultPath, includeCompleted },
+      () => [],
+    ).then((items) => items.map(normalizeScheduleItem)),
+  listTodoScheduleItems: async (vaultPath: string, includeCompleted = false) => {
+    const [todos, schedules] = await Promise.all([
+      commands.listTodoItems(vaultPath, includeCompleted),
+      commands.listScheduleItems(vaultPath, includeCompleted),
+    ]);
+    return sortTodoScheduleItems([...todos, ...schedules]);
+  },
+  promoteTodoScheduleCandidate: (vaultPath: string, candidateId: string) =>
+    invokeWithFallback<any>(
+      "promote_todo_schedule_candidate",
+      { vaultPath, candidateId: Number(candidateId) },
+      (reason) => ({
+        candidate: {
+          id: candidateId,
+          kind: "todo",
+          sourceRelativePath: "",
+          title: "候选确认不可用",
+          excerpt: "",
+          confidence: 0,
+          status: "pending",
+        },
+        status: "fallback",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizePromotionResult),
   confirmTodoScheduleCandidate: (
     vaultPath: string,
     candidateId: string,
@@ -2011,6 +2190,34 @@ export const commands = {
         fallbackReason: reason,
       }),
     ).then(normalizeCandidate),
+  setTodoItemStatus: (vaultPath: string, itemId: string, status: string) =>
+    invokeWithFallback<any>(
+      "set_todo_item_status",
+      { vaultPath, itemId: Number(itemId), status },
+      (reason) => ({
+        id: itemId,
+        title: "TODO 状态更新不可用",
+        status,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeTodoItem),
+  setScheduleItemStatus: (vaultPath: string, itemId: string, status: string) =>
+    invokeWithFallback<any>(
+      "set_schedule_item_status",
+      { vaultPath, itemId: Number(itemId), status },
+      (reason) => ({
+        id: itemId,
+        title: "日程状态更新不可用",
+        status,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeScheduleItem),
   dismissTodoScheduleCandidate: (vaultPath: string, candidateId: string) =>
     invokeWithFallback<any>(
       "dismiss_todo_schedule_candidate",

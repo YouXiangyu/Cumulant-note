@@ -925,6 +925,15 @@ textarea:focus {
   min-height: 38px;
 }
 
+.task-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
 .task-line span,
 .recent-list span,
 .project-files span,
@@ -2076,6 +2085,7 @@ kbd {
 .agent-history div,
 .project-files button,
 .project-todos label,
+.project-todo-row,
 .quick-actions {
   align-items: center;
 }
@@ -2100,7 +2110,8 @@ kbd {
 }
 
 .agent-history div,
-.project-todos label {
+.project-todos label,
+.project-todo-row {
   border-bottom: 1px solid var(--border);
   display: grid;
   gap: 10px;
@@ -2108,7 +2119,8 @@ kbd {
   min-height: 39px;
 }
 
-.project-todos input {
+.project-todos input,
+.project-todo-row input {
   height: 16px;
   width: 16px;
 }

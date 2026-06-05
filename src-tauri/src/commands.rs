@@ -1,3 +1,6 @@
+use crate::services::action_items::{
+    ActionItemService, CandidatePromotionResult, ScheduleItem, TodoItem,
+};
 use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
@@ -1026,6 +1029,65 @@ pub fn dismiss_todo_schedule_candidate(
     candidate_id: i64,
 ) -> Result<ActionCandidate, String> {
     into_command_result(CandidateService::reject(&vault_path, candidate_id))
+}
+
+#[tauri::command]
+pub fn promote_todo_schedule_candidate(
+    vault_path: String,
+    candidate_id: i64,
+) -> Result<CandidatePromotionResult, String> {
+    into_command_result(ActionItemService::promote_candidate(
+        &vault_path,
+        candidate_id,
+    ))
+}
+
+#[tauri::command]
+pub fn list_todo_items(
+    vault_path: String,
+    include_completed: Option<bool>,
+) -> Result<Vec<TodoItem>, String> {
+    into_command_result(ActionItemService::list_todo_items(
+        &vault_path,
+        include_completed.unwrap_or(false),
+    ))
+}
+
+#[tauri::command]
+pub fn list_schedule_items(
+    vault_path: String,
+    include_completed: Option<bool>,
+) -> Result<Vec<ScheduleItem>, String> {
+    into_command_result(ActionItemService::list_schedule_items(
+        &vault_path,
+        include_completed.unwrap_or(false),
+    ))
+}
+
+#[tauri::command]
+pub fn set_todo_item_status(
+    vault_path: String,
+    item_id: i64,
+    status: String,
+) -> Result<TodoItem, String> {
+    into_command_result(ActionItemService::set_todo_status(
+        &vault_path,
+        item_id,
+        &status,
+    ))
+}
+
+#[tauri::command]
+pub fn set_schedule_item_status(
+    vault_path: String,
+    item_id: i64,
+    status: String,
+) -> Result<ScheduleItem, String> {
+    into_command_result(ActionItemService::set_schedule_status(
+        &vault_path,
+        item_id,
+        &status,
+    ))
 }
 
 #[tauri::command]

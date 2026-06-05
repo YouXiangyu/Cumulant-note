@@ -99,6 +99,7 @@ import {
   selectVault,
   StickyNote as StickyNoteRecord,
   TodoScheduleCandidate,
+  TodoScheduleItem,
   UsageSummary,
   VaultInitResult,
   VaultTreeNode,
@@ -191,6 +192,24 @@ function formatDate(value?: string | number): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return typeof value === "string" ? value : "未记录";
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function isActiveActionItem(item: TodoScheduleItem): boolean {
+  return item.status === "open" || item.status === "scheduled";
+}
+
+function isCompletedActionItem(item: TodoScheduleItem): boolean {
+  return item.status === "completed";
+}
+
+function actionKindLabel(item: TodoScheduleItem | TodoScheduleCandidate): string {
+  return item.kind === "schedule" ? "日程" : "TODO";
+}
+
+function actionDateLabel(item: TodoScheduleItem): string {
+  const value = item.startsAt ?? item.dueAt;
+  if (!value) return item.kind === "schedule" ? "未定时间" : "无截止";
+  return formatDate(value);
 }
 
 function conversationTitle(conversation: RagConversation): string {
@@ -350,6 +369,7 @@ export default function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
+  const [todoScheduleItems, setTodoScheduleItems] = useState<TodoScheduleItem[]>([]);
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
   const [inboxPlanResult, setInboxPlanResult] = useState<InboxPlanResult | null>(null);
@@ -463,6 +483,22 @@ export default function App() {
     () => todoCandidates.filter((candidate) => candidate.status === "pending"),
     [todoCandidates],
   );
+  const activeActionItems = useMemo(
+    () => todoScheduleItems.filter((item) => !item.isFallback && isActiveActionItem(item)),
+    [todoScheduleItems],
+  );
+  const openTodoItems = useMemo(
+    () => activeActionItems.filter((item) => item.kind === "todo"),
+    [activeActionItems],
+  );
+  const scheduledItems = useMemo(
+    () => activeActionItems.filter((item) => item.kind === "schedule"),
+    [activeActionItems],
+  );
+  const completedActionItems = useMemo(
+    () => todoScheduleItems.filter((item) => !item.isFallback && item.status === "completed"),
+    [todoScheduleItems],
+  );
 
   const recentMarkdown = useMemo(() => markdownFiles.slice(0, 5), [markdownFiles]);
   const recoveryQueueItems = useMemo(
@@ -544,6 +580,11 @@ export default function App() {
   const pendingScheduleCount =
     realWorkspaceInsights?.candidates.pendingSchedule ??
     pendingCandidates.filter((candidate) => candidate.kind === "schedule" && !candidate.isFallback).length;
+  const openTodoCount = realWorkspaceInsights?.actionItems.openTodo ?? openTodoItems.length;
+  const scheduledActionCount = realWorkspaceInsights?.actionItems.scheduled ?? scheduledItems.length;
+  const completedActionCount = realWorkspaceInsights?.actionItems.completed ?? completedActionItems.length;
+  const formalActionCount =
+    realWorkspaceInsights?.actionItems.total ?? todoScheduleItems.filter((item) => !item.isFallback).length;
   const stickyActiveCount =
     realWorkspaceInsights?.sticky.active ?? stickyNotes.filter((note) => !note.isFallback).length;
   const movementCompletedCount =
@@ -655,7 +696,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextWorkspaceInsights, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus, nextRagConversations] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextWorkspaceInsights, nextTodoCandidates, nextTodoScheduleItems, nextNotes, nextMimoStatus, nextRagStatus, nextRagConversations] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -669,7 +710,8 @@ export default function App() {
         nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
         nextVaultPath ? commands.listAuditEvents(nextVaultPath, 30) : Promise.resolve([]),
         nextVaultPath ? commands.getWorkspaceInsights(nextVaultPath) : Promise.resolve(null),
-        commands.listTodoScheduleCandidates(nextVaultPath),
+        nextVaultPath ? commands.listTodoScheduleCandidates(nextVaultPath) : Promise.resolve([]),
+        nextVaultPath ? commands.listTodoScheduleItems(nextVaultPath, true) : Promise.resolve([]),
         commands.listStickyNotes(nextVaultPath),
         nextVaultPath ? commands.getMimoStatus(nextVaultPath) : Promise.resolve(null),
         nextVaultPath ? commands.getRagIndexStatus(nextVaultPath) : Promise.resolve(null),
@@ -691,6 +733,7 @@ export default function App() {
     setAuditEvents(nextAuditEvents);
     setWorkspaceInsights(nextWorkspaceInsights);
     setTodoCandidates(nextTodoCandidates);
+    setTodoScheduleItems(nextTodoScheduleItems);
     if (nextNotes.length > 0) {
       setStickyNotes(nextNotes);
     }
@@ -1192,14 +1235,23 @@ export default function App() {
 
   async function confirmCandidate(candidate: TodoScheduleCandidate) {
     const result = await run(
-      () => commands.confirmTodoScheduleCandidate(vaultPath, candidate.id, candidate),
+      () => commands.promoteTodoScheduleCandidate(vaultPath, candidate.id),
       "确认候选",
-      "候选已确认",
+      candidate.kind === "schedule" ? "已加入正式日程" : "已创建正式 TODO",
     );
     if (!result) return;
     setTodoCandidates((items) =>
-      items.map((item) => (item.id === candidate.id ? { ...item, ...result } : item)),
+      items.map((item) => (item.id === candidate.id ? { ...item, ...result.candidate } : item)),
     );
+    if (result.item) {
+      setTodoScheduleItems((items) => {
+        const withoutCurrent = items.filter(
+          (item) => !(item.kind === result.item?.kind && item.id === result.item.id),
+        );
+        return [result.item as TodoScheduleItem, ...withoutCurrent];
+      });
+    }
+    await refreshOperations(vaultPath);
   }
 
   async function dismissCandidate(candidate: TodoScheduleCandidate) {
@@ -1212,6 +1264,33 @@ export default function App() {
     setTodoCandidates((items) =>
       items.map((item) => (item.id === candidate.id ? { ...item, status: "dismissed" } : item)),
     );
+    await refreshOperations(vaultPath);
+  }
+
+  async function updateActionItemStatus(item: TodoScheduleItem, nextStatus: string) {
+    const result = await run(
+      () =>
+        item.kind === "schedule"
+          ? commands.setScheduleItemStatus(vaultPath, item.id, nextStatus)
+          : commands.setTodoItemStatus(vaultPath, item.id, nextStatus),
+      "更新行动项",
+      nextStatus === "completed" ? "行动项已完成" : "行动项已更新",
+    );
+    if (!result) return;
+    setTodoScheduleItems((items) =>
+      items.map((current) =>
+        current.kind === result.kind && current.id === result.id ? { ...current, ...result } : current,
+      ),
+    );
+    await refreshOperations(vaultPath);
+  }
+
+  async function completeActionItem(item: TodoScheduleItem) {
+    await updateActionItemStatus(item, "completed");
+  }
+
+  async function cancelActionItem(item: TodoScheduleItem) {
+    await updateActionItemStatus(item, "cancelled");
   }
 
   function addStickyNote() {
@@ -2393,31 +2472,30 @@ export default function App() {
             <div className="card-heading">
               <h3>
                 <Calendar size={18} aria-hidden="true" />
-                日程提醒与管理
+                TODO / 日程
               </h3>
-              <span>{pendingCandidates.length}</span>
+              <span>{activeActionItems.length}</span>
             </div>
             <div className="task-groups">
-              {pendingCandidates.slice(0, 4).map((candidate) => (
-                <div className="task-line" key={candidate.id}>
-                  <input type="checkbox" aria-label={candidate.title} />
-                  <span>{candidate.title}</span>
-                  <small>{candidate.dueAt ? formatDate(candidate.dueAt) : "待确认"}</small>
+              {activeActionItems.slice(0, 4).map((item) => (
+                <div className="task-line" key={`${item.kind}-${item.id}`}>
+                  <input
+                    type="checkbox"
+                    checked={isCompletedActionItem(item)}
+                    aria-label={item.title}
+                    onChange={() => completeActionItem(item)}
+                  />
+                  <span>{item.title}</span>
+                  <div className="task-meta">
+                    <small>{actionKindLabel(item)} · {actionDateLabel(item)}</small>
+                    <button type="button" className="text-link-button" onClick={() => cancelActionItem(item)}>
+                      取消
+                    </button>
+                  </div>
                 </div>
               ))}
-              {pendingCandidates.length === 0 ? (
-                <>
-                  <div className="task-line">
-                    <input type="checkbox" aria-label="深度学习作业" />
-                    <span>深度学习-作业4</span>
-                    <small>今天</small>
-                  </div>
-                  <div className="task-line">
-                    <input type="checkbox" aria-label="项目评审" />
-                    <span>项目评审准备</span>
-                    <small>明天</small>
-                  </div>
-                </>
+              {activeActionItems.length === 0 ? (
+                <p className="empty-state">暂无正式 TODO/日程；可在收集箱确认候选后创建。</p>
               ) : null}
             </div>
             <button type="button" className="text-link-button" onClick={() => setActiveView("inbox")}>
@@ -2822,22 +2900,28 @@ export default function App() {
 
             <section className="concept-card">
               <div className="card-heading">
-                <h3>待确认日程</h3>
+                <h3>待确认 TODO / 日程</h3>
                 <span>{pendingCandidates.length}</span>
               </div>
               {pendingCandidates.slice(0, 2).map((candidate) => (
                 <article className="schedule-card" key={candidate.id}>
-                  <Calendar size={20} aria-hidden="true" />
+                  {candidate.kind === "schedule" ? (
+                    <Calendar size={20} aria-hidden="true" />
+                  ) : (
+                    <ListChecks size={20} aria-hidden="true" />
+                  )}
                   <div>
                     <strong>{candidate.title}</strong>
                     <span>{candidate.excerpt}</span>
                     <small>来源：{candidate.sourceRelativePath}</small>
                   </div>
-                  <button type="button" onClick={() => confirmCandidate(candidate)}>添加到日程</button>
+                  <button type="button" onClick={() => confirmCandidate(candidate)}>
+                    {candidate.kind === "schedule" ? "加入日程" : "确认为 TODO"}
+                  </button>
                   <button type="button" className="secondary-button" onClick={() => dismissCandidate(candidate)}>忽略</button>
                 </article>
               ))}
-              {pendingCandidates.length === 0 ? <p className="empty-state">暂无待确认日程</p> : null}
+              {pendingCandidates.length === 0 ? <p className="empty-state">暂无待确认 TODO/日程候选</p> : null}
             </section>
 
             <section className="concept-card">
@@ -3148,10 +3232,10 @@ export default function App() {
               <h3><Target size={18} aria-hidden="true" /> TODO / 日程 / 便签</h3>
             </div>
             <div className="goal-grid">
-              <div><CheckCircle2 size={26} aria-hidden="true" /><strong>{pendingTodoCount}</strong><span>待确认 TODO</span></div>
-              <div><Calendar size={26} aria-hidden="true" /><strong>{pendingScheduleCount}</strong><span>待确认日程</span></div>
+              <div><CheckCircle2 size={26} aria-hidden="true" /><strong>{openTodoCount}</strong><span>正式 TODO</span></div>
+              <div><Calendar size={26} aria-hidden="true" /><strong>{scheduledActionCount}</strong><span>正式日程</span></div>
               <div><StickyNote size={26} aria-hidden="true" /><strong>{stickyActiveCount}</strong><span>活跃便签</span></div>
-              <div><Star size={26} aria-hidden="true" /><strong>{realWorkspaceInsights?.candidates.confirmed ?? todoCandidates.filter((candidate) => candidate.status === "confirmed").length}</strong><span>已确认候选</span></div>
+              <div><Star size={26} aria-hidden="true" /><strong>{pendingTodoCount + pendingScheduleCount}</strong><span>待确认候选</span></div>
             </div>
           </article>
         </section>
@@ -3194,7 +3278,8 @@ export default function App() {
             <div className="accumulation-list">
               <div><FileText size={22} aria-hidden="true" /><span>RAG 文档</span><strong>{ragDocumentCount}</strong></div>
               <div><MessageCircle size={22} aria-hidden="true" /><span>RAG 会话</span><strong>{ragConversationCount}</strong></div>
-              <div><Bot size={22} aria-hidden="true" /><span>候选总数</span><strong>{realWorkspaceInsights?.candidates.total ?? todoCandidates.filter((candidate) => !candidate.isFallback).length}</strong></div>
+              <div><Bot size={22} aria-hidden="true" /><span>正式行动项</span><strong>{formalActionCount}</strong></div>
+              <div><CheckCircle2 size={22} aria-hidden="true" /><span>已完成行动</span><strong>{completedActionCount}</strong></div>
             </div>
           </article>
         </section>
@@ -3220,9 +3305,8 @@ export default function App() {
       projectFileCount > 0 ? Math.round((projectMarkdownCount / projectFileCount) * 100) : 0;
     const projectSourceLabel =
       selectedProject?.source === "insights" ? "真实统计" : selectedProject?.source === "tree" ? "Vault 树派生" : "占位兜底";
-    const projectScopedCandidates = pendingCandidates
-      .filter((candidate) => !candidate.isFallback)
-      .filter((candidate) => selectedProject?.relativePath && candidate.sourceRelativePath.startsWith(selectedProject.relativePath))
+    const projectScopedActionItems = activeActionItems
+      .filter((item) => selectedProject?.relativePath && item.sourceRelativePath?.startsWith(selectedProject.relativePath))
       .slice(0, 4);
     const projectAuditRows = auditEvents.filter((event) => !event.isFallback).slice(0, 4);
 
@@ -3314,18 +3398,23 @@ export default function App() {
           <article className="concept-card">
             <div className="card-heading">
               <h3><ListChecks size={18} aria-hidden="true" /> 下一步行动 / TODO</h3>
-              <button type="button" className="chip-button">候选/后续</button>
+              <button type="button" className="chip-button">正式/SQLite</button>
             </div>
             <div className="project-todos">
-              {projectScopedCandidates.map((candidate) => (
-                <label key={candidate.id}>
-                  <input type="checkbox" checked={candidate.status === "confirmed"} readOnly />
-                  <span>{candidate.title}</span>
-                  <small>{candidate.kind === "schedule" ? "日程候选" : "TODO 候选"}</small>
-                </label>
+              {projectScopedActionItems.map((item) => (
+                <div className="project-todo-row" key={`${item.kind}-${item.id}`}>
+                  <input
+                    type="checkbox"
+                    checked={isCompletedActionItem(item)}
+                    onChange={() => completeActionItem(item)}
+                    aria-label={item.title}
+                  />
+                  <span>{item.title}</span>
+                  <small>{actionKindLabel(item)} · {actionDateLabel(item)}</small>
+                </div>
               ))}
-              {projectScopedCandidates.length === 0 ? (
-                <p className="empty-state">暂无项目路径匹配的真实候选；正式项目任务系统后续接入。</p>
+              {projectScopedActionItems.length === 0 ? (
+                <p className="empty-state">暂无项目路径匹配的正式行动项；可从收集箱候选确认生成。</p>
               ) : null}
             </div>
           </article>

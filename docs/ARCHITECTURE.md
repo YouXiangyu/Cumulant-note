@@ -150,7 +150,7 @@ Markdown frontmatter 只保存适合用户可见的小型元数据：
 
 ## 6. TODO、日程和档案
 
-TheBrain 后续需要建立从内容到行动和档案的模型：
+TheBrain 正在建立从内容到行动和档案的模型：
 
 ```text
 会议纪要 / 通话记录 / 笔记 / 便利贴
@@ -160,10 +160,20 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
   -> 保留来源引用
 ```
 
+当前第一增量已经完成 TODO/日程候选到正式行动项的内部闭环：
+
+- `action_candidates` 保存 TODO/日程候选，来源可以是收集箱整理计划、便利贴或后续抽取服务。
+- `todo_items` 保存正式 TODO，包含来源候选、来源文件、标题、备注、截止时间、原始 payload、状态和完成/取消时间。
+- `schedule_items` 保存正式日程，包含来源候选、来源文件、标题、备注、开始/结束时间、全天、时区、地点、原始 payload、状态和完成/取消时间。
+- `promote_todo_schedule_candidate` 对同一候选幂等创建正式项，并把候选标记为 confirmed；被 rejected 的候选不能 promotion。
+- `list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 提供第一层列表、完成和取消能力。
+- 正式行动项当前是 `.thebrain/index.sqlite` 内部状态；不会写入 Markdown frontmatter，也不代表已经有提醒通知、重复日程、跨设备同步或完整 TickTick 式任务系统。
+
 关键决策尚未完成：
 
 - 档案数据写入 Markdown、SQLite，还是两者结合。
-- TODO/日程是否自动确认。
+- TODO/日程是否允许自动确认、何时需要批量确认或人工复核。
+- TODO/日程是否需要 Markdown/YAML 双写，以及双写后的 source of truth 和重建策略。
 - 联系方式等敏感信息如何显示、导出和保护。
 
 ## 7. 前端与后端关系
@@ -178,7 +188,7 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 
 后端逐步补齐真实能力。前端不应把未实现后端能力伪装成真实成功。
 
-个人页和项目工作台已接入 Workspace Insights 第一版：后端通过 `get_workspace_insights` 只读扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、movement、audit 和 sticky 计数；前端优先使用这些真实统计。学习曲线、项目级 Agent 历史、联系人档案、正式任务系统和复杂长期统计仍按后续能力处理，不能描述为已完成。
+个人页和项目工作台已接入 Workspace Insights 第一版：后端通过 `get_workspace_insights` 只读扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、正式行动项、movement、audit 和 sticky 计数；前端优先使用这些真实统计。学习曲线、项目级 Agent 历史、联系人档案、提醒通知和复杂长期统计仍按后续能力处理，不能描述为已完成。
 
 ## 8. 当前主要服务
 
@@ -196,6 +206,7 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 - `retrieval.rs`：检索通道、范围过滤和评分。
 - `chunking.rs`：Markdown 分块。
 - `rag_trace.rs`：Trace 持久化。
+- `action_items.rs`：TODO/日程候选 promotion、正式 TODO/日程列表和状态更新。
 - `workspace_insights.rs`：个人页和项目工作台的只读统计聚合。
 - `index.rs`：SQLite schema。
 - `budget.rs` / `usage.rs`：预算和用量。

@@ -18,6 +18,7 @@ pub struct WorkspaceInsights {
     pub recent_files: Vec<RecentFileSummary>,
     pub rag: RagInsights,
     pub candidates: CandidateInsights,
+    pub action_items: ActionItemInsights,
     pub movement: MovementInsights,
     pub audit: AuditInsights,
     pub sticky: StickyInsights,
@@ -74,6 +75,16 @@ pub struct CandidateInsights {
     pub pending_schedule: i64,
     pub confirmed: i64,
     pub rejected: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemInsights {
+    pub open_todo: i64,
+    pub scheduled: i64,
+    pub completed: i64,
+    pub cancelled: i64,
     pub total: i64,
 }
 
@@ -148,6 +159,7 @@ impl WorkspaceInsightsService {
             recent_files: recent_files(vault_scan.files, 8),
             rag: load_rag_insights(&connection)?,
             candidates: load_candidate_insights(&connection)?,
+            action_items: load_action_item_insights(&connection)?,
             movement: load_movement_insights(&connection)?,
             audit: load_audit_insights(&connection)?,
             sticky: load_sticky_insights(&connection)?,
@@ -322,6 +334,37 @@ fn load_candidate_insights(connection: &Connection) -> ServiceResult<CandidateIn
             "SELECT COUNT(*) FROM action_candidates WHERE status = 'rejected'",
         )?,
         total: count_i64(connection, "SELECT COUNT(*) FROM action_candidates")?,
+    })
+}
+
+fn load_action_item_insights(connection: &Connection) -> ServiceResult<ActionItemInsights> {
+    Ok(ActionItemInsights {
+        open_todo: count_i64(
+            connection,
+            "SELECT COUNT(*) FROM todo_items WHERE status = 'open'",
+        )?,
+        scheduled: count_i64(
+            connection,
+            "SELECT COUNT(*) FROM schedule_items WHERE status = 'scheduled'",
+        )?,
+        completed: count_i64(
+            connection,
+            "SELECT
+                (SELECT COUNT(*) FROM todo_items WHERE status = 'completed') +
+                (SELECT COUNT(*) FROM schedule_items WHERE status = 'completed')",
+        )?,
+        cancelled: count_i64(
+            connection,
+            "SELECT
+                (SELECT COUNT(*) FROM todo_items WHERE status = 'cancelled') +
+                (SELECT COUNT(*) FROM schedule_items WHERE status = 'cancelled')",
+        )?,
+        total: count_i64(
+            connection,
+            "SELECT
+                (SELECT COUNT(*) FROM todo_items) +
+                (SELECT COUNT(*) FROM schedule_items)",
+        )?,
     })
 }
 
@@ -561,6 +604,7 @@ mod tests {
         assert_eq!(empty.rag.query_count, 0);
         assert_eq!(empty.rag.last_run_status, None);
         assert_eq!(empty.candidates.total, 0);
+        assert_eq!(empty.action_items.total, 0);
         assert_eq!(empty.movement.total, 0);
         assert_eq!(empty.audit.total, 0);
         assert_eq!(empty.audit.recent_count, 0);
@@ -633,6 +677,10 @@ mod tests {
         seed_candidate(&connection, "schedule", "pending", &now);
         seed_candidate(&connection, "todo", "confirmed", &now);
         seed_candidate(&connection, "schedule", "rejected", &now);
+        seed_todo_item(&connection, "open", &now);
+        seed_todo_item(&connection, "completed", &now);
+        seed_schedule_item(&connection, "scheduled", &now);
+        seed_schedule_item(&connection, "cancelled", &now);
         seed_movement(&connection, "moved", &now);
         seed_movement(&connection, "rolled_back", &now);
         seed_movement(&connection, "conflict", &now);
@@ -656,6 +704,11 @@ mod tests {
         assert_eq!(insights.candidates.confirmed, 1);
         assert_eq!(insights.candidates.rejected, 1);
         assert_eq!(insights.candidates.total, 4);
+        assert_eq!(insights.action_items.open_todo, 1);
+        assert_eq!(insights.action_items.scheduled, 1);
+        assert_eq!(insights.action_items.completed, 1);
+        assert_eq!(insights.action_items.cancelled, 1);
+        assert_eq!(insights.action_items.total, 4);
         assert_eq!(insights.movement.completed, 1);
         assert_eq!(insights.movement.rolled_back, 1);
         assert_eq!(insights.movement.conflict, 1);
@@ -715,6 +768,28 @@ mod tests {
                     (operation, source_relative_path, target_relative_path, status, created_at)
                  VALUES ('move', '000-收集箱/a.md', '100-School/a.md', ?1, ?2)",
                 params![status, now],
+            )
+            .unwrap();
+    }
+
+    fn seed_todo_item(connection: &Connection, status: &str, now: &str) {
+        connection
+            .execute(
+                "INSERT INTO todo_items
+                    (title, payload_json, status, created_at, updated_at)
+                 VALUES (?1, '{}', ?2, ?3, ?3)",
+                params![format!("todo-{status}"), status, now],
+            )
+            .unwrap();
+    }
+
+    fn seed_schedule_item(connection: &Connection, status: &str, now: &str) {
+        connection
+            .execute(
+                "INSERT INTO schedule_items
+                    (title, payload_json, status, created_at, updated_at)
+                 VALUES (?1, '{}', ?2, ?3, ?3)",
+                params![format!("schedule-{status}"), status, now],
             )
             .unwrap();
     }
