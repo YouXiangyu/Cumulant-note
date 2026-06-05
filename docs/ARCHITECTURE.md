@@ -143,7 +143,8 @@ Markdown frontmatter 只保存适合用户可见的小型元数据：
 - 真实 embedding。
 - 向量检索。
 - rerank。
-- 多轮会话 UI。
+- 多轮会话 UI 第一版已接入：会话列表、会话创建、会话详情读取、user/assistant 消息持久化，以及全库、当前文件、当前目录/项目前缀范围检索。
+- 后续仍需会话重命名、删除、历史搜索、引用筛选和跨会话长期记忆策略。
 - 跨文件长期记忆策略。
 - 更强引用定位和打开能力。
 
@@ -191,8 +192,8 @@ TheBrain 后续需要建立从内容到行动和档案的模型：
 - `audit.rs`：审计事件写入、最近事件列表和按类型查询。
 - `conflict_rules.rs`：冲突详情、bounded preview、只读重命名建议、用户答案规则 Markdown、规则索引、启用/禁用/编辑、命中记录、相似规则推荐和确认应用。
 - `queue.rs`：队列状态、claim/retry、失败/冲突单项恢复和 listener 状态持久化。
-- `rag.rs`：RAG 索引和问答编排。
-- `retrieval.rs`：检索通道和评分。
+- `rag.rs`：RAG 索引、会话消息和问答编排。
+- `retrieval.rs`：检索通道、范围过滤和评分。
 - `chunking.rs`：Markdown 分块。
 - `rag_trace.rs`：Trace 持久化。
 - `index.rs`：SQLite schema。

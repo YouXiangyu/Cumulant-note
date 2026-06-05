@@ -1,8 +1,35 @@
-use crate::services::ServiceResult;
+use crate::services::vault::{normalize_relative_path, INBOX_DIR, INTERNAL_DIR, LEDGER_FILE};
+use crate::services::{ServiceError, ServiceResult};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RagScope {
+    AllVault,
+    CurrentFile {
+        #[serde(rename = "relativePath")]
+        relative_path: String,
+    },
+    ProjectPrefix {
+        #[serde(rename = "relativePathPrefix")]
+        relative_path_prefix: String,
+    },
+}
+
+impl Default for RagScope {
+    fn default() -> Self {
+        Self::AllVault
+    }
+}
+
+impl RagScope {
+    pub fn validate(&self) -> ServiceResult<()> {
+        ScopeFilter::from_scope(Some(self)).map(|_| ())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,12 +76,56 @@ struct IndexedChunk {
     end_line: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopeFilter {
+    AllVault,
+    CurrentFile(String),
+    ProjectPrefix(String),
+}
+
+impl ScopeFilter {
+    fn from_scope(scope: Option<&RagScope>) -> ServiceResult<Self> {
+        match scope {
+            None | Some(RagScope::AllVault) => Ok(Self::AllVault),
+            Some(RagScope::CurrentFile { relative_path }) => Ok(Self::CurrentFile(
+                validate_scope_path("currentFile", relative_path)?,
+            )),
+            Some(RagScope::ProjectPrefix {
+                relative_path_prefix,
+            }) => Ok(Self::ProjectPrefix(validate_scope_path(
+                "projectPrefix",
+                relative_path_prefix,
+            )?)),
+        }
+    }
+
+    fn matches(&self, relative_path: &str) -> bool {
+        match self {
+            Self::AllVault => true,
+            Self::CurrentFile(path) => relative_path == path,
+            Self::ProjectPrefix(prefix) => {
+                relative_path == prefix || relative_path.starts_with(&format!("{prefix}/"))
+            }
+        }
+    }
+}
+
 pub fn retrieve(
     connection: &Connection,
     question: &str,
     top_k: usize,
 ) -> ServiceResult<RetrievalOutput> {
-    let chunks = fetch_active_chunks(connection)?;
+    retrieve_with_scope(connection, question, top_k, None)
+}
+
+pub fn retrieve_with_scope(
+    connection: &Connection,
+    question: &str,
+    top_k: usize,
+    scope: Option<&RagScope>,
+) -> ServiceResult<RetrievalOutput> {
+    let filter = ScopeFilter::from_scope(scope)?;
+    let chunks = fetch_active_chunks(connection, &filter)?;
     let keyword = rank_channel(
         "keyword",
         &chunks,
@@ -107,7 +178,10 @@ pub fn summaries_json(summaries: &[SearchChannelSummary]) -> Value {
     json!(summaries)
 }
 
-fn fetch_active_chunks(connection: &Connection) -> ServiceResult<Vec<IndexedChunk>> {
+fn fetch_active_chunks(
+    connection: &Connection,
+    filter: &ScopeFilter,
+) -> ServiceResult<Vec<IndexedChunk>> {
     let mut statement = connection.prepare(
         "SELECT
             c.id,
@@ -138,7 +212,50 @@ fn fetch_active_chunks(connection: &Connection) -> ServiceResult<Vec<IndexedChun
             end_line: row.get(8)?,
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let mut chunks = Vec::new();
+    for row in rows {
+        let chunk = row?;
+        if filter.matches(&chunk.relative_path) {
+            chunks.push(chunk);
+        }
+    }
+    Ok(chunks)
+}
+
+fn validate_scope_path(kind: &str, raw_path: &str) -> ServiceResult<String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceError::InvalidRelativePath(format!(
+            "{kind} scope path must not be empty"
+        )));
+    }
+    if trimmed.contains('\\') {
+        return Err(ServiceError::InvalidRelativePath(trimmed.to_string()));
+    }
+    let normalized = normalize_relative_path(trimmed)?;
+    if normalized == format!("{INBOX_DIR}/{LEDGER_FILE}") {
+        return Err(ServiceError::InvalidRelativePath(normalized));
+    }
+    if normalized
+        .split('/')
+        .any(|component| is_blocked_scope_component(component))
+    {
+        return Err(ServiceError::InvalidRelativePath(normalized));
+    }
+    Ok(normalized)
+}
+
+fn is_blocked_scope_component(component: &str) -> bool {
+    [
+        INTERNAL_DIR,
+        ".secrets",
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+    ]
+    .iter()
+    .any(|blocked| component.eq_ignore_ascii_case(blocked))
 }
 
 fn rank_channel(
@@ -329,6 +446,49 @@ mod tests {
     use crate::services::index::IndexService;
     use rusqlite::params;
 
+    fn insert_indexed_chunk(connection: &Connection, relative_path: &str, content: &str) {
+        let now = "2026-06-02T00:00:00Z";
+        connection
+            .execute(
+                "INSERT INTO rag_documents
+                 (relative_path, title, content_hash, modified_at, size_bytes, status, chunk_count, indexed_at)
+                 VALUES (?1, ?2, ?3, 0, 0, 'active', 1, ?4)",
+                params![
+                    relative_path,
+                    relative_path,
+                    format!("doc-hash:{relative_path}"),
+                    now
+                ],
+            )
+            .unwrap();
+        let document_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO rag_chunks
+                 (document_id, relative_path, chunk_index, heading_path, content, snippet, start_line, end_line,
+                  char_start, char_end, char_count, token_estimate, content_hash, status, created_at, updated_at)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, 3, 0, 20, 20, 5, ?6, 'active', ?7, ?7)",
+                params![
+                    document_id,
+                    relative_path,
+                    serde_json::to_string(&Vec::<String>::new()).unwrap(),
+                    content,
+                    content,
+                    format!("chunk-hash:{relative_path}"),
+                    now
+                ],
+            )
+            .unwrap();
+    }
+
+    fn result_paths(output: &RetrievalOutput) -> Vec<String> {
+        output
+            .results
+            .iter()
+            .map(|item| item.relative_path.clone())
+            .collect()
+    }
+
     #[test]
     fn keyword_and_placeholder_channels_return_ranked_citations() {
         let temp = tempfile::tempdir().unwrap();
@@ -368,5 +528,114 @@ mod tests {
         assert_eq!(output.results[0].citation_id, "S1");
         assert!(output.results[0].score > 0.0);
         assert_eq!(output.summaries.len(), 2);
+    }
+
+    #[test]
+    fn all_vault_scope_matches_existing_retrieval() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = IndexService::open_or_create(temp.path()).unwrap();
+        let connection = Connection::open(db.path).unwrap();
+        insert_indexed_chunk(&connection, "100-School/a.md", "alpha shared topic");
+        insert_indexed_chunk(&connection, "200-Life/b.md", "alpha shared topic");
+
+        let default_output = retrieve(&connection, "alpha", 10).unwrap();
+        let scoped_output =
+            retrieve_with_scope(&connection, "alpha", 10, Some(&RagScope::AllVault)).unwrap();
+
+        assert_eq!(result_paths(&default_output), result_paths(&scoped_output));
+        assert_eq!(scoped_output.results.len(), 2);
+    }
+
+    #[test]
+    fn current_file_scope_only_matches_exact_relative_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = IndexService::open_or_create(temp.path()).unwrap();
+        let connection = Connection::open(db.path).unwrap();
+        insert_indexed_chunk(&connection, "Projects/App/a.md", "alpha scoped note");
+        insert_indexed_chunk(&connection, "Projects/App/b.md", "alpha sibling note");
+
+        let output = retrieve_with_scope(
+            &connection,
+            "alpha",
+            10,
+            Some(&RagScope::CurrentFile {
+                relative_path: "Projects/App/a.md".to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result_paths(&output), vec!["Projects/App/a.md"]);
+    }
+
+    #[test]
+    fn project_prefix_scope_matches_directory_without_similar_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = IndexService::open_or_create(temp.path()).unwrap();
+        let connection = Connection::open(db.path).unwrap();
+        insert_indexed_chunk(&connection, "Project/note.md", "alpha project note");
+        insert_indexed_chunk(
+            &connection,
+            "Project/Sub/deep.md",
+            "alpha nested project note",
+        );
+        insert_indexed_chunk(&connection, "ProjectX/note.md", "alpha wrong project note");
+
+        let output = retrieve_with_scope(
+            &connection,
+            "alpha",
+            10,
+            Some(&RagScope::ProjectPrefix {
+                relative_path_prefix: "Project".to_string(),
+            }),
+        )
+        .unwrap();
+
+        let paths = result_paths(&output);
+        assert!(paths.contains(&"Project/note.md".to_string()));
+        assert!(paths.contains(&"Project/Sub/deep.md".to_string()));
+        assert!(!paths.contains(&"ProjectX/note.md".to_string()));
+    }
+
+    #[test]
+    fn scope_rejects_traversal_internal_tool_and_backslash_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = IndexService::open_or_create(temp.path()).unwrap();
+        let connection = Connection::open(db.path).unwrap();
+        let invalid_scopes = vec![
+            RagScope::CurrentFile {
+                relative_path: "../secret.md".to_string(),
+            },
+            RagScope::CurrentFile {
+                relative_path: "/outside.md".to_string(),
+            },
+            RagScope::CurrentFile {
+                relative_path: "Project\\note.md".to_string(),
+            },
+            RagScope::CurrentFile {
+                relative_path: ".thebrain/rules/a.md".to_string(),
+            },
+            RagScope::CurrentFile {
+                relative_path: ".secrets/key.txt".to_string(),
+            },
+            RagScope::ProjectPrefix {
+                relative_path_prefix: "notes/node_modules".to_string(),
+            },
+            RagScope::ProjectPrefix {
+                relative_path_prefix: "target".to_string(),
+            },
+            RagScope::ProjectPrefix {
+                relative_path_prefix: "dist".to_string(),
+            },
+            RagScope::CurrentFile {
+                relative_path: format!("{INBOX_DIR}/{LEDGER_FILE}"),
+            },
+            RagScope::ProjectPrefix {
+                relative_path_prefix: " ".to_string(),
+            },
+        ];
+
+        for scope in invalid_scopes {
+            assert!(retrieve_with_scope(&connection, "alpha", 10, Some(&scope)).is_err());
+        }
     }
 }

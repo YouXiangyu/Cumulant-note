@@ -80,6 +80,37 @@ export interface RagIndexStatus extends CommandMeta {
   lastRun?: RagIndexRun;
 }
 
+export type RagScope =
+  | { kind: "allVault" }
+  | { kind: "currentFile"; relativePath: string }
+  | { kind: "projectPrefix"; relativePathPrefix: string };
+
+export interface RagConversation extends CommandMeta {
+  id: number;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt?: string;
+  messageCount?: number;
+}
+
+export interface RagMessage extends CommandMeta {
+  id: number;
+  conversationId: number;
+  role: "user" | "assistant" | "system" | string;
+  content: string;
+  createdAt: string;
+  queryId?: number;
+  status?: string;
+  isMock?: boolean;
+  fallbackReason?: string;
+}
+
+export interface RagConversationDetail extends CommandMeta {
+  conversation: RagConversation;
+  messages: RagMessage[];
+}
+
 export interface RagCitation {
   id: string;
   relativePath: string;
@@ -120,6 +151,7 @@ export interface RagTraceRun {
 
 export interface RagAnswer extends CommandMeta {
   queryId: number;
+  conversationId?: number;
   provider: string;
   model: string;
   status: string;
@@ -656,6 +688,40 @@ function fallbackRagRun(reason: string): RagIndexRun & CommandMeta {
   };
 }
 
+function fallbackRagConversations(reason: string): (RagConversation & CommandMeta)[] {
+  void reason;
+  return [];
+}
+
+function fallbackRagConversation(title: string | undefined, reason: string): RagConversation {
+  return {
+    id: 0,
+    title: title?.trim() || "未保存的 RAG 对话",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    messageCount: 0,
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackRagConversationDetail(conversationId: number, reason: string): RagConversationDetail {
+  return {
+    conversation: {
+      id: conversationId,
+      title: "RAG 对话不可用",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      messageCount: 0,
+      isFallback: true,
+      fallbackReason: reason,
+    },
+    messages: [],
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
 function fallbackRagAnswer(question: string, reason: string): RagAnswer {
   const trace: RagTraceRun = {
     id: 0,
@@ -1098,6 +1164,50 @@ function normalizeAuditEvent(raw: any): AuditEvent {
   };
 }
 
+function normalizeRagConversation(raw: any): RagConversation {
+  if (!raw || typeof raw !== "object") {
+    return raw as RagConversation;
+  }
+  return {
+    id: Number(raw.id ?? raw.conversationId ?? raw.conversation_id ?? 0),
+    title: raw.title ?? raw.name ?? "未命名 RAG 对话",
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? raw.lastMessageAt ?? raw.last_message_at ?? nowIso(),
+    lastMessageAt: raw.lastMessageAt ?? raw.last_message_at,
+    messageCount: raw.messageCount ?? raw.message_count,
+    isFallback: raw.isFallback,
+    fallbackReason: raw.fallbackReason,
+  };
+}
+
+function normalizeRagMessage(raw: any): RagMessage {
+  if (!raw || typeof raw !== "object") {
+    return raw as RagMessage;
+  }
+  return {
+    id: Number(raw.id ?? 0),
+    conversationId: Number(raw.conversationId ?? raw.conversation_id ?? 0),
+    role: raw.role ?? "assistant",
+    content: raw.content ?? raw.message ?? raw.answer ?? "",
+    createdAt: raw.createdAt ?? raw.created_at ?? nowIso(),
+    queryId: raw.queryId ?? raw.query_id,
+    status: raw.status,
+    isMock: raw.isMock ?? raw.is_mock,
+    fallbackReason: raw.fallbackReason ?? raw.fallback_reason,
+    isFallback: raw.isFallback ?? raw.is_fallback,
+  };
+}
+
+function normalizeRagConversationDetail(raw: any): RagConversationDetail {
+  const conversation = normalizeRagConversation(raw?.conversation ?? raw ?? {});
+  return {
+    conversation,
+    messages: Array.isArray(raw?.messages) ? raw.messages.map(normalizeRagMessage) : [],
+    isFallback: raw?.isFallback ?? conversation.isFallback,
+    fallbackReason: raw?.fallbackReason ?? conversation.fallbackReason,
+  };
+}
+
 function normalizeBatchQueueResult(raw: any): BatchQueueResult {
   return {
     requested: Number(raw?.requested ?? 0),
@@ -1290,10 +1400,34 @@ export const commands = {
       { vaultPath },
       fallbackRagStatus,
     ),
-  askRag: (vaultPath: string, question: string, topK = 6, conversationId?: number) =>
+  listRagConversations: (vaultPath: string, limit = 20) =>
+    invokeWithFallback<any[]>(
+      "list_rag_conversations",
+      { vaultPath, limit },
+      fallbackRagConversations,
+    ).then((items) => items.map(normalizeRagConversation)),
+  createRagConversation: (vaultPath: string, title?: string) =>
+    invokeWithFallback<any>(
+      "create_rag_conversation",
+      { vaultPath, title },
+      (reason) => fallbackRagConversation(title, reason),
+    ).then(normalizeRagConversation),
+  getRagConversation: (vaultPath: string, conversationId: number) =>
+    invokeWithFallback<any>(
+      "get_rag_conversation",
+      { vaultPath, conversationId },
+      (reason) => fallbackRagConversationDetail(conversationId, reason),
+    ).then(normalizeRagConversationDetail),
+  askRag: (
+    vaultPath: string,
+    question: string,
+    topK = 6,
+    conversationId?: number,
+    scope?: RagScope,
+  ) =>
     invokeWithFallback<RagAnswer>(
       "ask_rag",
-      { vaultPath, question, topK, conversationId },
+      { vaultPath, question, topK, conversationId, scope },
       (reason) => fallbackRagAnswer(question, reason),
     ),
   getLatestRagTrace: (vaultPath: string) =>

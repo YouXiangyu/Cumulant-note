@@ -87,8 +87,11 @@ import {
   QueueItem,
   QueueStatus,
   RagAnswer,
+  RagConversation,
   RagIndexRun,
   RagIndexStatus,
+  RagMessage,
+  RagScope,
   RagTraceRun,
   ResidentWorkerStatus,
   selectImportFiles,
@@ -104,6 +107,7 @@ import {
 
 type ViewId = "dashboard" | "inbox" | "markdown" | "notes" | "personal" | "project" | "settings";
 type ImportBehavior = "copy" | "move";
+type RagScopeKind = RagScope["kind"];
 
 interface AppError {
   title: string;
@@ -166,11 +170,31 @@ function parentTreePaths(relativePath: string): string[] {
   return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
 }
 
+function isMarkdownPath(path?: string): path is string {
+  return Boolean(path && /\.(md|markdown)$/i.test(path));
+}
+
+function directoryPrefix(relativePath: string): string {
+  const segments = relativePath.split("/").filter(Boolean);
+  return segments.length > 1 ? segments.slice(0, -1).join("/") : "";
+}
+
 function formatDate(value?: string | number): string {
   if (!value) return "未记录";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return typeof value === "string" ? value : "未记录";
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function conversationTitle(conversation: RagConversation): string {
+  return conversation.title?.trim() || `RAG 对话 #${conversation.id}`;
+}
+
+function messageRoleLabel(role: string): string {
+  if (role === "user") return "我";
+  if (role === "assistant") return "助手";
+  if (role === "system") return "系统";
+  return role;
 }
 
 function formatBudget(cents: number): string {
@@ -291,6 +315,11 @@ export default function App() {
   const [ragAnswer, setRagAnswer] = useState<RagAnswer | null>(null);
   const [ragTrace, setRagTrace] = useState<RagTraceRun | null>(null);
   const [ragIsAsking, setRagIsAsking] = useState(false);
+  const [ragConversations, setRagConversations] = useState<RagConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
+  const [ragMessages, setRagMessages] = useState<RagMessage[]>([]);
+  const [ragScopeKind, setRagScopeKind] = useState<RagScopeKind>("allVault");
+  const [ragHistoryNotice, setRagHistoryNotice] = useState("");
   const [exported, setExported] = useState("");
   const [status, setStatus] = useState("等待选择 Vault");
   const [appError, setAppError] = useState<AppError | null>(null);
@@ -372,6 +401,24 @@ export default function App() {
     [projects, selectedProjectId],
   );
 
+  const activeConversation = useMemo(
+    () => ragConversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+    [activeConversationId, ragConversations],
+  );
+
+  const currentMarkdownRelativePath = useMemo(() => {
+    if (isMarkdownPath(markdownDoc?.relativePath)) return markdownDoc.relativePath;
+    if (isMarkdownPath(relativePath) && markdownFiles.some((file) => file.relativePath === relativePath)) {
+      return relativePath;
+    }
+    return "";
+  }, [markdownDoc?.relativePath, markdownFiles, relativePath]);
+
+  const currentDirectoryPrefix = useMemo(
+    () => (currentMarkdownRelativePath ? directoryPrefix(currentMarkdownRelativePath) : ""),
+    [currentMarkdownRelativePath],
+  );
+
   const activeNote = useMemo(
     () => stickyNotes.find((note) => note.id === activeNoteId) ?? stickyNotes[0] ?? null,
     [activeNoteId, stickyNotes],
@@ -450,6 +497,15 @@ export default function App() {
   }, [projects, selectedProjectId]);
 
   useEffect(() => {
+    if (ragScopeKind === "currentFile" && !currentMarkdownRelativePath) {
+      setRagScopeKind("allVault");
+    }
+    if (ragScopeKind === "projectPrefix" && !currentDirectoryPrefix && !selectedProject?.relativePath) {
+      setRagScopeKind("allVault");
+    }
+  }, [currentDirectoryPrefix, currentMarkdownRelativePath, ragScopeKind, selectedProject?.relativePath]);
+
+  useEffect(() => {
     const parentPaths = parentTreePaths(relativePath);
     if (parentPaths.length === 0) return;
     setExpandedTreePaths((current) => {
@@ -507,7 +563,7 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextConflictRules, nextMoveLogs, nextAuditEvents, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus, nextRagConversations] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
@@ -524,6 +580,7 @@ export default function App() {
         commands.listStickyNotes(nextVaultPath),
         nextVaultPath ? commands.getMimoStatus(nextVaultPath) : Promise.resolve(null),
         nextVaultPath ? commands.getRagIndexStatus(nextVaultPath) : Promise.resolve(null),
+        nextVaultPath ? commands.listRagConversations(nextVaultPath, 20) : Promise.resolve([]),
       ]);
 
     setSettings((current) =>
@@ -545,6 +602,11 @@ export default function App() {
     }
     setMimoStatus(nextMimoStatus);
     setRagStatus(nextRagStatus);
+    setRagConversations(nextRagConversations);
+    if (activeConversationId && !nextRagConversations.some((conversation) => conversation.id === activeConversationId)) {
+      setActiveConversationId(null);
+      setRagMessages([]);
+    }
   }
 
   async function chooseVault() {
@@ -1332,27 +1394,126 @@ export default function App() {
     await refreshOperations(vaultPath);
   }
 
-  async function submitPrompt(prompt: string, scope: string) {
+  function startNewRagConversation() {
+    setActiveConversationId(null);
+    setRagMessages([]);
+    setRagAnswer(null);
+    setRagTrace(null);
+    setRagHistoryNotice("");
+    setActiveView("dashboard");
+    setStatus("已准备新 RAG 对话");
+  }
+
+  async function loadRagConversation(conversationId: number) {
+    if (!vaultPath || !conversationId) return;
+    const result = await run(
+      () => commands.getRagConversation(vaultPath, conversationId),
+      "读取 RAG 对话",
+      "RAG 对话已打开",
+    );
+    if (!result || result.isFallback) {
+      setRagHistoryNotice(result?.fallbackReason ? `会话历史未连接：${result.fallbackReason}` : "会话历史未连接。");
+      return;
+    }
+    setActiveConversationId(result.conversation.id);
+    setRagMessages(result.messages);
+    setRagConversations((current) => {
+      const withoutCurrent = current.filter((conversation) => conversation.id !== result.conversation.id);
+      return [result.conversation, ...withoutCurrent];
+    });
+    setRagHistoryNotice("");
+    setActiveView("dashboard");
+  }
+
+  function ragScopePrefix(kind: "dashboard" | "project"): string {
+    if (kind === "project") return selectedProject?.relativePath ?? "";
+    return currentDirectoryPrefix || selectedProject?.relativePath || "";
+  }
+
+  function resolveRagScope(kind: "dashboard" | "project"): { scope: RagScope; label: string; detail: string } {
+    if (ragScopeKind === "currentFile" && currentMarkdownRelativePath) {
+      return {
+        scope: { kind: "currentFile", relativePath: currentMarkdownRelativePath },
+        label: "当前文件",
+        detail: currentMarkdownRelativePath,
+      };
+    }
+    const prefix = ragScopePrefix(kind);
+    if (ragScopeKind === "projectPrefix" && prefix) {
+      return {
+        scope: { kind: "projectPrefix", relativePathPrefix: prefix },
+        label: kind === "project" ? "当前项目" : currentDirectoryPrefix ? "当前目录" : "项目前缀",
+        detail: prefix,
+      };
+    }
+    return { scope: { kind: "allVault" }, label: "全库", detail: "整个 Vault" };
+  }
+
+  async function submitPrompt(prompt: string, scope: string, kind: "dashboard" | "project"): Promise<boolean> {
     const trimmed = prompt.trim();
-    if (!trimmed || ragIsAsking) return;
+    if (!trimmed || ragIsAsking) return false;
     if (!vaultPath) {
       setAppError({
         title: "尚未选择 Vault",
         detail: "RAG 问答需要先读取本地 Vault 索引。",
         recovery: "选择并初始化 Vault，然后重建 RAG 索引。",
       });
-      return;
+      return false;
     }
+    const ragScope = resolveRagScope(kind);
     setRagIsAsking(true);
     try {
+      let conversationId = activeConversationId;
+      if (!conversationId) {
+        const created = await run(
+          () => commands.createRagConversation(vaultPath, trimmed.slice(0, 36)),
+          "创建 RAG 对话",
+          "RAG 对话已创建",
+        );
+        if (!created || created.isFallback || !created.id) {
+          setRagHistoryNotice(
+            created?.fallbackReason
+              ? `RAG 会话未保存：${created.fallbackReason}`
+              : "RAG 会话未保存，未继续提交问题。",
+          );
+          return false;
+        }
+        conversationId = created.id;
+        setActiveConversationId(conversationId);
+        setRagConversations((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+        setRagMessages([]);
+        setRagHistoryNotice("");
+      }
+      const savedConversationId = conversationId;
+      if (!savedConversationId) return false;
+
       const result = await run(
-        () => commands.askRag(vaultPath, trimmed, 6),
-        `${scope} RAG 问答`,
+        () => commands.askRag(vaultPath, trimmed, 6, savedConversationId, ragScope.scope),
+        `${scope} RAG 问答（范围：${ragScope.label}）`,
         "RAG 已回答",
       );
-      if (!result) return;
+      if (!result) return false;
       setRagAnswer(result);
       setRagTrace(result.trace);
+      if (result.isFallback) {
+        setRagHistoryNotice("本次回答是 fallback，不能确认已写入 RAG 会话历史。");
+        return true;
+      }
+      const [detail, conversations] = await Promise.all([
+        commands.getRagConversation(vaultPath, savedConversationId),
+        commands.listRagConversations(vaultPath, 20),
+      ]);
+      setRagConversations(conversations);
+      if (detail.isFallback) {
+        setRagHistoryNotice(
+          detail.fallbackReason ? `回答已返回，但会话详情未刷新：${detail.fallbackReason}` : "回答已返回，但会话详情未刷新。",
+        );
+      } else {
+        setActiveConversationId(detail.conversation.id);
+        setRagMessages(detail.messages);
+        setRagHistoryNotice("");
+      }
+      return true;
     } finally {
       setRagIsAsking(false);
     }
@@ -1838,20 +1999,27 @@ export default function App() {
         </section>
 
         <section className="sidebar-section conversation-section">
-          <h2>对话 / 历史</h2>
+          <div className="section-title-row">
+            <h2>RAG 会话</h2>
+            <button type="button" className="tiny-icon-button" title="新对话" onClick={startNewRagConversation}>
+              <Plus size={14} aria-hidden="true" />
+            </button>
+          </div>
           <div className="conversation-list">
-            {ledger.slice(0, 3).map((item) => (
+            {ragConversations.map((conversation) => (
               <button
                 type="button"
-                key={`${item.lineNumber}-${item.targetRelativePath}`}
-                onClick={() => item.exists && openMarkdown(item.targetRelativePath)}
-                disabled={!item.exists}
+                key={conversation.id}
+                className={conversation.id === activeConversationId ? "active" : undefined}
+                onClick={() => void loadRagConversation(conversation.id)}
               >
-                <span>{item.displayName}</span>
-                <small>归档记录</small>
+                <span>{conversationTitle(conversation)}</span>
+                <small>
+                  {conversation.messageCount ? `${conversation.messageCount} 条` : "暂无消息"} · {formatDate(conversation.lastMessageAt ?? conversation.updatedAt)}
+                </small>
               </button>
             ))}
-            {ledger.length === 0 ? <p className="sidebar-empty">暂无归档历史</p> : null}
+            {ragConversations.length === 0 ? <p className="sidebar-empty">暂无 RAG 会话</p> : null}
           </div>
         </section>
 
@@ -1890,10 +2058,17 @@ export default function App() {
   function renderPromptBox(kind: "dashboard" | "project") {
     const value = kind === "dashboard" ? chatPrompt : projectPrompt;
     const setValue = kind === "dashboard" ? setChatPrompt : setProjectPrompt;
+    const scopeSummary = resolveRagScope(kind);
+    const prefixAvailable = Boolean(ragScopePrefix(kind));
+    const prefixLabel = kind === "project" ? "当前项目" : currentDirectoryPrefix ? "当前目录" : "项目前缀";
     const placeholder =
       kind === "dashboard"
         ? "输入你的问题或想法，按 Enter 发送，Shift + Enter 换行"
         : `询问关于 ${selectedProject?.name ?? "项目"} 的问题，或让 Agent 帮你推进项目...`;
+    const submitCurrentPrompt = async () => {
+      const submitted = await submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话", kind);
+      if (submitted) setValue("");
+    };
     return (
       <div className={kind === "dashboard" ? "prompt-box hero-prompt" : "prompt-box"}>
         <textarea
@@ -1904,8 +2079,7 @@ export default function App() {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               if (ragIsAsking) return;
-              void submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话");
-              setValue("");
+              void submitCurrentPrompt();
             }
           }}
         />
@@ -1919,14 +2093,43 @@ export default function App() {
               智能模式
               <ChevronDown size={14} aria-hidden="true" />
             </button>
+            <div className="scope-segmented" aria-label="RAG 问答范围">
+              <button
+                type="button"
+                className={ragScopeKind === "allVault" ? "active" : undefined}
+                onClick={() => setRagScopeKind("allVault")}
+                title="在整个 Vault 中检索"
+              >
+                全库
+              </button>
+              <button
+                type="button"
+                className={ragScopeKind === "currentFile" ? "active" : undefined}
+                onClick={() => setRagScopeKind("currentFile")}
+                disabled={!currentMarkdownRelativePath}
+                title={currentMarkdownRelativePath || "当前没有可用 Markdown 文件"}
+              >
+                当前文件
+              </button>
+              <button
+                type="button"
+                className={ragScopeKind === "projectPrefix" ? "active" : undefined}
+                onClick={() => setRagScopeKind("projectPrefix")}
+                disabled={!prefixAvailable}
+                title={ragScopePrefix(kind) || "当前没有可用目录或项目前缀"}
+              >
+                {prefixLabel}
+              </button>
+            </div>
           </div>
           <div className="prompt-tools">
+            <button type="button" className="chip-button" title={scopeSummary.detail}>范围：{scopeSummary.label}</button>
             <button type="button" className="chip-button">RAG · MiMo</button>
             <button type="button" className="chip-button api-connected">
               <Circle size={8} aria-hidden="true" />
               {mimoKeyLabel}
             </button>
-            <button type="button" className="send-button" onClick={() => void submitPrompt(value, kind === "dashboard" ? "主对话" : "项目对话")} disabled={ragIsAsking}>
+            <button type="button" className="send-button" onClick={() => void submitCurrentPrompt()} disabled={ragIsAsking}>
               <Send size={18} aria-hidden="true" />
             </button>
           </div>
@@ -1977,6 +2180,31 @@ export default function App() {
               <span>删除 {lastRun.deletedCount}</span>
             </div>
           ) : null}
+          <div className="rag-conversation-bar">
+            <div>
+              <span>当前会话</span>
+              <strong>{activeConversation ? conversationTitle(activeConversation) : "新 RAG 对话"}</strong>
+            </div>
+            <button type="button" className="text-link-button" onClick={startNewRagConversation}>
+              新对话
+            </button>
+          </div>
+          {ragHistoryNotice ? <p className="rag-history-notice">{ragHistoryNotice}</p> : null}
+          <div className="rag-message-list" aria-label="当前 RAG 会话消息">
+            {ragMessages.map((message) => (
+              <div className={`rag-message ${message.role === "user" ? "user" : "assistant"}`} key={message.id}>
+                <span>{messageRoleLabel(message.role)}</span>
+                <p>{message.content}</p>
+                <small>
+                  {formatDate(message.createdAt)}
+                  {message.status ? ` · ${message.status}` : ""}
+                  {message.isMock || message.isFallback ? " · fallback" : ""}
+                </small>
+              </div>
+            ))}
+            {activeConversationId && ragMessages.length === 0 ? <p className="empty-state">当前会话暂无已保存消息</p> : null}
+            {!activeConversationId ? <p className="empty-state">提问后会先创建 RAG 会话并保存历史</p> : null}
+          </div>
           {ragIsAsking ? (
             <div className="rag-answer rag-answer-loading">
               <div className="rag-answer-meta">
@@ -2910,7 +3138,7 @@ export default function App() {
             <p>构建一个智能文档审查与生成平台，支持团队协作、多格式解析与 AI 辅助写作。</p>
             <div className="milestone-row">
               <CheckCircle2 size={17} aria-hidden="true" />
-              <span>实现文档解析与向量索引</span>
+              <span>实现文档解析与本地检索索引</span>
               <small>6 小时前</small>
             </div>
             <div className="project-progress"><i style={{ width: "62%" }} /></div>
@@ -2923,7 +3151,7 @@ export default function App() {
               <button type="button" className="text-link-button">查看全部</button>
             </div>
             <div className="agent-history">
-              {["实现文档解析与向量索引", "确认进度", "同步到 GitHub", "Build GO repo scaffold plus S1 web framework", "列出项目技能"].map((item, index) => (
+              {["实现文档解析与本地检索索引", "确认进度", "同步到 GitHub", "Build GO repo scaffold plus S1 web framework", "列出项目技能"].map((item, index) => (
                 <div key={item}>
                   <MessageCircle size={16} aria-hidden="true" />
                   <span>{item}</span>

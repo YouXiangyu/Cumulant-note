@@ -17,8 +17,11 @@ use crate::services::listener::{ListenerService, DEFAULT_LISTENER_STABLE_WAIT_MS
 use crate::services::markdown::{MarkdownDocument, MarkdownExport, MarkdownService};
 use crate::services::movement::{MoveLog, MoveRequest, MovementService};
 use crate::services::queue::{ListenerState, QueueItem, QueueService};
-use crate::services::rag::{RagAnswer, RagIndexRun, RagIndexStatus, RagService};
+use crate::services::rag::{
+    RagAnswer, RagConversation, RagConversationSummary, RagIndexRun, RagIndexStatus, RagService,
+};
 use crate::services::rag_trace::RagTraceRun;
+use crate::services::retrieval::RagScope;
 use crate::services::settings::{AppSettings, AppSettingsInput, SettingsService};
 use crate::services::sticky::{StickyNote, StickyNoteInput, StickyService};
 use crate::services::usage::{UsageService, UsageSummary};
@@ -385,14 +388,39 @@ pub fn get_rag_index_status(vault_path: String) -> Result<RagIndexStatus, String
 }
 
 #[tauri::command]
+pub fn list_rag_conversations(
+    vault_path: String,
+    limit: Option<usize>,
+) -> Result<Vec<RagConversationSummary>, String> {
+    into_command_result(RagService::list_conversations(&vault_path, limit))
+}
+
+#[tauri::command]
+pub fn create_rag_conversation(
+    vault_path: String,
+    title: Option<String>,
+) -> Result<RagConversationSummary, String> {
+    into_command_result(RagService::create_conversation(&vault_path, title))
+}
+
+#[tauri::command]
+pub fn get_rag_conversation(
+    vault_path: String,
+    conversation_id: i64,
+) -> Result<RagConversation, String> {
+    into_command_result(RagService::get_conversation(&vault_path, conversation_id))
+}
+
+#[tauri::command]
 pub async fn ask_rag(
     vault_path: String,
     question: String,
     top_k: Option<usize>,
     conversation_id: Option<i64>,
+    scope: Option<RagScope>,
 ) -> Result<RagAnswer, String> {
     let task = tauri::async_runtime::spawn_blocking(move || {
-        RagService::ask(&vault_path, &question, top_k, conversation_id)
+        RagService::ask(&vault_path, &question, top_k, conversation_id, scope)
     });
     match task.await {
         Ok(result) => into_command_result(result),
