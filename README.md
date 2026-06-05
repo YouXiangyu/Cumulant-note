@@ -14,7 +14,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - Markdown 读写、预览、导出和 YAML frontmatter 过滤。
 - 收集箱导入、抽取、整理计划、移动、ledger、movement log、audit events 和回滚。
 - 收集箱递归展示、监听与自动入队第一版：递归处理当前 Vault 的 `000-收集箱/` 子目录，跳过 ledger、内部目录、隐藏/临时文件、目录项和不支持的文件类型，稳定等待后基于路径、mtime、size 去重入队。
-- Archive Map / 动态归档模板第一版：扫描正式 Vault 目录结构，完全排除 `000-收集箱/`、`.thebrain/`、`.secrets/` 和工具目录，生成 `.thebrain/rules/archive-map.md`，并把目录地图接入手动“生成计划”和 worker 共用的整理决策 prompt；当前还会在读取地图时做只读健康检查，展示缓存目录是否相对当前正式 Vault 目录失效，以及基于 movement log 的历史归档命中排行。
+- Archive Map / 动态归档模板第一版：扫描正式 Vault 目录结构，完全排除 `000-收集箱/`、`.thebrain/`、`.secrets/` 和工具目录，生成 `.thebrain/rules/archive-map.md`，并把目录地图接入手动“生成计划”和 worker 共用的整理决策 prompt；当前还会在读取地图时做只读健康检查，展示缓存目录是否相对当前正式 Vault 目录失效、基于 movement log 的历史归档命中排行，以及用户目录说明/锁定规则第一增量。
 - 收集箱队列的第一层可信 worker：手动单轮消费 pending 队列、暂停/恢复、稳定等待、预算检查、MiMo 抽取与整理决策、非 mock 且可信时自动移动、失败/冲突写入内部状态。
 - 应用内 resident worker 第一版：用户可在收集箱页手动启动/停止 5 秒 tick 的常驻消费循环；它复用 `WorkerService::drain`，单并发、每 tick 最多处理 1 条队列项，不是系统服务，也不会随应用启动自动运行。
 - 冲突问题与规则记忆第一版：前端可查看 open conflict、只读预览源/目标文件状态与文本片段、选择处理动作、使用只读重命名建议、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中、启用/禁用/编辑状态和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
@@ -61,7 +61,7 @@ AI 可以在用户指定的 Vault 范围内自动整理并移动 `000-收集箱/
 - embedding、AI prompt/response、token usage、移动历史、队列日志不写入 Markdown frontmatter，只进入 `.thebrain` 内部结构。
 - TODO、日程、联系人档案等行动项可以由 AI 生成候选；是否自动写入正式系统需要在后续 PRD 中按场景定义。
 
-当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、真正的差异预览和更完整的自动冲突处理仍是后续目标。
+当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、Archive Map 用户目录说明/锁定规则第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、真正的差异预览和更完整的自动冲突处理仍是后续目标。
 
 Archive Map 的设计边界是：只扫描正式 Vault 归档目录，完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为归档目标，也不提供归档分类结构；历史参考只能来自 `收集箱-已整理.md`、movement log 或 audit events 中的已完成移动记录。
 
@@ -78,12 +78,14 @@ Vault/
   .thebrain/
     index.sqlite
     rules/
+      archive-map.md
+      archive-map-rules.md
       inbox-organizing-rules.md
   .secrets/
     mimo_api_key.txt   # 可选，gitignored，不提交
 ```
 
-`.thebrain/index.sqlite` 当前包含：`vault_meta`、`file_index`、`ai_usage`、`audit_events`、`listener_state`、`queue_items`、`dedupe_records`、`budget_settings`、`budget_ledger`、`movement_log`、`conflict_rules`、`conflict_rule_hits`、`archive_map_runs`、`archive_map_entries`、`action_candidates`、`todo_items`、`schedule_items`、`sticky_notes`、`rag_documents`、`rag_chunks`、`rag_index_runs`、`rag_queries`、`rag_trace_runs`、`rag_trace_nodes`、`rag_conversations`、`rag_messages`。
+`.thebrain/index.sqlite` 当前包含：`vault_meta`、`file_index`、`ai_usage`、`audit_events`、`listener_state`、`queue_items`、`dedupe_records`、`budget_settings`、`budget_ledger`、`movement_log`、`conflict_rules`、`conflict_rule_hits`、`archive_map_runs`、`archive_map_entries`、`archive_map_directory_rules`、`action_candidates`、`todo_items`、`schedule_items`、`sticky_notes`、`rag_documents`、`rag_chunks`、`rag_index_runs`、`rag_queries`、`rag_trace_runs`、`rag_trace_nodes`、`rag_conversations`、`rag_messages`。
 
 ## 凭据与安全
 
@@ -115,16 +117,16 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 前端层：
 
 - `src/App.tsx`：桌面工作台 shell，包含 Vault、收集箱、Markdown、AI 整理、RAG 问答、TODO/日程、便利贴、个人页、项目页和设置页。
-- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段、MiMo 状态、抽取、整理计划、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程、冲突详情/预览、冲突规则管理和 RAG 会话/问答命令。
+- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段和目录规则保存、MiMo 状态、抽取、整理计划、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程、冲突详情/预览、冲突规则管理和 RAG 会话/问答命令。
 - `src/styles.css`：视觉 token、左侧导航、页面网格、收集箱、RAG 面板、Markdown 三栏编辑器和便利贴布局。
 
 本地后端服务层：
 
-- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、MiMo、listener、队列、worker、resident worker、预算、移动/回滚、audit timeline/search、批量恢复预览、候选、正式 TODO/日程、便利贴、快捷键、冲突预览/规则管理和 RAG commands。
+- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、Archive Map/目录规则、MiMo、listener、队列、worker、resident worker、预算、移动/回滚、audit timeline/search、批量恢复预览、候选、正式 TODO/日程、便利贴、快捷键、冲突预览/规则管理和 RAG commands。
 - `src-tauri/src/services/vault.rs`：Vault 初始化和路径规范化。
 - `src-tauri/src/services/importer.rs`：受控复制/移动外部文件到收集箱。
 - `src-tauri/src/services/listener.rs`：收集箱递归扫描与监听入队规则、稳定等待、临时/隐藏/内部/不支持文件跳过、mtime/size 去重和 listener 状态更新。
-- `src-tauri/src/services/archive_map.rs`：扫描正式 Vault 目录结构，生成 `.thebrain/rules/archive-map.md` 和 SQLite 缓存，供整理计划和 worker 共享目标目录上下文；读取 snapshot 时只读比较缓存目录与当前正式目录，并基于 movement log 生成历史归档命中统计。
+- `src-tauri/src/services/archive_map.rs`：扫描正式 Vault 目录结构，生成 `.thebrain/rules/archive-map.md` 和 SQLite 缓存，供整理计划和 worker 共享目标目录上下文；读取 snapshot 时只读比较缓存目录与当前正式目录，并基于 movement log 生成历史归档命中统计；目录说明/整理提示/锁定规则保存到 `archive_map_directory_rules`，并镜像到 `.thebrain/rules/archive-map-rules.md`。
 - `src-tauri/src/services/ai.rs`：MiMo 状态、文本本地抽取、音频/图片 MiMo 抽取、结构化整理 JSON 解析和 fallback。
 - `src-tauri/src/services/worker.rs`：收集箱队列的第一层可信消费器，负责 claim pending item、稳定等待、预算检查、调用 MiMo、可信移动、失败/冲突/audit 记录和 drain；手动 worker 与 resident worker 都复用这一服务。
 - `src-tauri/src/services/movement.rs`：收集箱文件移动、移动后空目录清理、ledger、movement log、audit events 和回滚。
@@ -134,7 +136,7 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - `src-tauri/src/services/rag.rs`、`retrieval.rs`、`chunking.rs`、`rag_trace.rs`：本地 RAG 索引、范围检索、会话消息、分块、引用和 Trace。
 - `src-tauri/src/services/index.rs`：`.thebrain/index.sqlite` schema。
 
-MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；listener 只负责发现 `000-收集箱/` 中允许处理的普通文件并稳定去重入队，递归扫描和递归 watcher 会覆盖子目录，但会跳过 ledger、`.thebrain`、`.secrets`、隐藏/临时文件和不支持的文件类型；Archive Map 扫描正式 Vault 归档目录并生成 `.thebrain/rules/archive-map.md`，整理计划和后台 worker 通过同一个整理决策入口读取这份地图；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker 和手动启动/停止的应用内 resident worker：它们只处理 `000-收集箱/` 中的普通文件；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件，移动成功后会清理收集箱内变空的父目录。冲突规则第一版只做只读预览、推荐与用户确认应用，规则 Markdown 位于 `.thebrain/rules/`，不会被 listener 或 RAG 当作用户内容处理；规则编辑/禁用只更新 SQLite 和 audit，不重写历史 Markdown 规则条目。收集箱状态面板第一版会把 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 汇总到同一页面，并提供队列单项/批量重试、跳过以及 movement log 单项/批量回滚。resident worker 当前不是系统服务，不随应用启动自启；长时间实机稳定性、更完整批量策略和完整冲突恢复体验仍是后续目标。
+MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；listener 只负责发现 `000-收集箱/` 中允许处理的普通文件并稳定去重入队，递归扫描和递归 watcher 会覆盖子目录，但会跳过 ledger、`.thebrain`、`.secrets`、隐藏/临时文件和不支持的文件类型；Archive Map 扫描正式 Vault 归档目录并生成 `.thebrain/rules/archive-map.md`，目录规则保存到 SQLite 并镜像为 `.thebrain/rules/archive-map-rules.md`，整理计划和后台 worker 通过同一个整理决策入口读取这份地图与规则；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker 和手动启动/停止的应用内 resident worker：它们只处理 `000-收集箱/` 中的普通文件；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件，移动成功后会清理收集箱内变空的父目录。冲突规则第一版只做只读预览、推荐与用户确认应用，规则 Markdown 位于 `.thebrain/rules/`，不会被 listener 或 RAG 当作用户内容处理；规则编辑/禁用只更新 SQLite 和 audit，不重写历史 Markdown 规则条目。收集箱状态面板第一版会把 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 汇总到同一页面，并提供队列单项/批量重试、跳过以及 movement log 单项/批量回滚。resident worker 当前不是系统服务，不随应用启动自启；长时间实机稳定性、更完整批量策略和完整冲突恢复体验仍是后续目标。
 
 ## 使用方式
 
@@ -154,7 +156,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `000-收集箱` 递归文件展示与 ledger 相对 wikilink 历史映射。
 - 受控导入命令 `import_to_inbox`，支持 copy/move、冲突不覆盖、audit/queue 记录。
 - 收集箱 listener 命令 `get_inbox_listener_status`、`start_inbox_watcher`、`stop_inbox_watcher`、`scan_inbox_queue`，支持启动、停止、查询状态和递归手动扫描入队。
-- Archive Map 命令 `get_archive_map`、`rebuild_archive_map`，生成可读 `.thebrain/rules/archive-map.md`，缓存正式目录、样本文件、关键词线索和历史归档引用；`get_archive_map` 返回只读健康状态、失效目录列表和基于 movement log 的历史归档命中排行。
+- Archive Map 命令 `get_archive_map`、`rebuild_archive_map`、`save_archive_map_directory_rule`，生成可读 `.thebrain/rules/archive-map.md`，缓存正式目录、样本文件、关键词线索和历史归档引用；`get_archive_map` 返回只读健康状态、失效目录列表、基于 movement log 的历史归档命中排行和目录规则；目录规则保存到 SQLite 并镜像为 `.thebrain/rules/archive-map-rules.md`，只允许绑定当前正式归档目录。
 - MiMo 状态命令 `get_mimo_status`，不泄露 key。
 - 抽取命令 `extract_with_mimo`，支持文本本地抽取和音频/图片 MiMo 调用路径。
 - 单文件计划命令 `plan_inbox_item`，返回 extraction、structured plan、候选和预算状态。
@@ -179,7 +181,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 
 ## 未完成目标
 
-- Archive Map 增强：第一版已能扫描正式 Vault 目录、生成可读地图并接入整理决策；当前已接入只读健康检查、失效目录提示和历史归档命中排行第一增量。后续仍需更丰富的目录语义总结、用户编辑/锁定规则、长期趋势可视化和更强的新目录建议确认体验。
+- Archive Map 增强：第一版已能扫描正式 Vault 目录、生成可读地图并接入整理决策；当前已接入只读健康检查、失效目录提示、历史归档命中排行和用户目录说明/锁定规则第一增量。后续仍需更丰富的目录语义总结、规则生命周期与批量编辑、长期趋势可视化和更强的新目录建议确认体验。
 - resident worker 增强：当前第一版只是用户手动启动/停止的应用内循环；后续仍需系统级后台服务或托盘生命周期策略、应用启动自启策略、长时间实机监听稳定性、批量处理策略和更完整的自动整理策略。
 - 真实 MiMo API 的长时间、多文件类型、带成本实机联调。
 - MiMo 返回 token/cost 的真实精确统计。
@@ -212,4 +214,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、健康失效检测和 movement log 历史归档命中统计、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。

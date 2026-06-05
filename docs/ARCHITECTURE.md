@@ -62,7 +62,7 @@ Archive Map / 动态归档模板是目标 pipeline 中的核心上下文服务�
 - 收集箱扫描负责发现 `000-收集箱/` 中等待处理的文件。
 - Archive Map 扫描负责读取正式 Vault 的目录结构，生成可归档目标地图，供 MiMo 做目标路径决策。
 
-当前 Archive Map 第一版默认排除 `.thebrain/`、`.secrets/`、`.git/`、`node_modules/`、`target/`、`dist/` 等内部或工具目录，并完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为正式归档目标，也不提供归档分类结构。历史整理参考来自 `收集箱-已整理.md` 和 movement log 中的已完成移动记录。Archive Map 保存为用户可读 Markdown：`.thebrain/rules/archive-map.md`；SQLite 使用 `archive_map_runs` 和 `archive_map_entries` 缓存目录索引、生成时间和历史引用。读取 Archive Map snapshot 时会只读扫描当前正式目录，与上次缓存结果比较，返回 `ok/stale/empty/fallback` 健康状态、失效目录列表，并从 `movement_log.status = 'moved'` 聚合历史归档命中排行；这些健康字段不触发自动移动，也不会自动重建或修改 Vault 目录。
+当前 Archive Map 第一版默认排除 `.thebrain/`、`.secrets/`、`.git/`、`node_modules/`、`target/`、`dist/` 等内部或工具目录，并完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为正式归档目标，也不提供归档分类结构。历史整理参考来自 `收集箱-已整理.md` 和 movement log 中的已完成移动记录。Archive Map 保存为用户可读 Markdown：`.thebrain/rules/archive-map.md`；SQLite 使用 `archive_map_runs` 和 `archive_map_entries` 缓存目录索引、生成时间和历史引用。用户目录说明、整理提示和锁定状态保存到 `archive_map_directory_rules`，并镜像为 `.thebrain/rules/archive-map-rules.md`，只允许绑定当前正式 Archive Map 目录。读取 Archive Map snapshot 时会只读扫描当前正式目录，与上次缓存结果比较，返回 `ok/stale/empty/fallback` 健康状态、失效目录列表、目录规则，并从 `movement_log.status = 'moved'` 聚合历史归档命中排行；这些健康字段和规则字段不触发自动移动，也不会自动重建或修改 Vault 目录。
 
 AI 整理决策必须优先选择 Archive Map 中已有目录。只有当已有目录确实不适合时，才允许建议新建目录；新建目录、低置信度、目标冲突或分类边界不清必须进入 conflict/用户确认流程。当前手动“生成计划”和后台 worker 已经通过同一个整理决策入口共用 Archive Map。
 
@@ -90,7 +90,7 @@ AI 整理决策必须优先选择 Archive Map 中已有目录。只有当已有�
 - 后台 worker 是本地调度器，负责消费队列、稳定等待、调用 MiMo、检查预算、执行移动、写日志、处理重试和回滚。
 - 当前 `worker.rs` 已实现第一层手动 drain worker：一次只 claim 一个 pending item，跳过 ledger、内部目录和非收集箱路径，支持 listener 和导入产生的队列项；只有抽取与整理决策均为可信 `ok` 且非 mock 时才移动文件；缺 key、预算阻断、解析失败、低置信度和目标冲突都会停在 failed/conflict 状态，并尝试附带相似冲突规则推荐。
 - 当前 `commands.rs` 提供应用内 resident worker 第一版：用户可手动启动/停止一个 5 秒 tick 的常驻循环；它复用 `WorkerService::drain`，单并发、每 tick 最多处理 1 条队列项，不是系统服务，也不会随应用启动自动运行。
-- 当前收集箱状态面板第一版汇总 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 状态，展示最近事件、最近错误；主操作区提供导入、递归扫描入队、重建归档地图、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留 Archive Map 健康/失效/历史归档命中摘要、失败/冲突队列项单项恢复、批量恢复只读预览/确认、冲突详情预览、动作选择、规则编辑/禁用和 movement log 单项回滚/批量回滚只读预览。
+- 当前收集箱状态面板第一版汇总 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 状态，展示最近事件、最近错误；主操作区提供导入、递归扫描入队、重建归档地图、保存 Archive Map 目录规则、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留 Archive Map 健康/失效/历史归档命中摘要、目录说明/锁定规则、失败/冲突队列项单项恢复、批量恢复只读预览/确认、冲突详情预览、动作选择、规则编辑/禁用和 movement log 单项回滚/批量回滚只读预览。
 - 批量恢复命令只循环调用现有单项安全服务：队列批量重试/跳过复用 `QueueService::retry_item` / `skip_item`，movement log 批量回滚复用 `MovementService::rollback`，因此仍遵守状态校验、Vault 路径限制和不覆盖已有文件规则。`preview_queue_recovery` 和 `preview_rollback_moves` 是只读命令，只报告 eligible、blocking reason 和 warning，不写 audit、不写 ledger、不移动文件；真正执行时仍由原批量命令重新校验并写 audit。
 - audit timeline 当前支持 `list_audit_events` 读取最近事件，以及 `search_audit_events` 按事件类型、文本、路径、queue id、movement id、状态、时间和 before id 做第一版搜索。前端提供类型筛选和文本搜索，但完整分页详情、日期范围 UI 和长期审计分析仍是后续目标。
 - 只有 MiMo provider、listener、Archive Map、冲突规则服务、resident worker、批量恢复预览或状态面板不等于已经有完整后台自动整理；长期可信自动整理仍需要长时间实机监听验证、系统/托盘生命周期策略、更完整批量策略、真正 diff 视图和强确认移动动作。
@@ -199,7 +199,7 @@ TheBrain 正在建立从内容到行动和档案的模型：
 - `ai.rs`：MiMo、抽取、整理决策和 fallback。
 - `worker.rs`：收集箱队列第一层消费、暂停恢复、可信移动、失败/冲突审计；手动 worker 与应用内 resident worker 都复用这一服务。
 - `movement.rs`：文件移动、空目录清理、ledger、audit、回滚和只读回滚预览。
-- `archive_map.rs`：扫描正式 Vault 目录结构，生成 `.thebrain/rules/archive-map.md` 和 SQLite 缓存，供整理计划和 worker 共享；读取 snapshot 时只读返回健康状态、失效目录和 movement log 历史归档命中统计。
+- `archive_map.rs`：扫描正式 Vault 目录结构，生成 `.thebrain/rules/archive-map.md` 和 SQLite 缓存，供整理计划和 worker 共享；目录说明/整理提示/锁定状态保存到 `archive_map_directory_rules` 并镜像为 `.thebrain/rules/archive-map-rules.md`；读取 snapshot 时只读返回健康状态、失效目录、目录规则和 movement log 历史归档命中统计。
 - `audit.rs`：审计事件写入、最近事件列表、按类型查询和第一版 search。
 - `conflict_rules.rs`：冲突详情、bounded preview、只读重命名建议、用户答案规则 Markdown、规则索引、启用/禁用/编辑、命中记录、相似规则推荐和确认应用。
 - `queue.rs`：队列状态、claim/retry、失败/冲突单项恢复、只读恢复预览所需读取和 listener 状态持久化。

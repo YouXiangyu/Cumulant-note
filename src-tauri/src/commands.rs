@@ -4,7 +4,10 @@ use crate::services::action_items::{
 use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
-use crate::services::archive_map::{ArchiveMapService, ArchiveMapSnapshot};
+use crate::services::archive_map::{
+    ArchiveMapDirectoryRule, ArchiveMapDirectoryRuleInput, ArchiveMapService, ArchiveMapSnapshot,
+    ARCHIVE_MAP_RULES_RELATIVE_PATH,
+};
 use crate::services::audit::{AuditEvent, AuditEventSearchResult, AuditSearchQuery, AuditService};
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
@@ -176,6 +179,16 @@ pub struct BatchRollbackPreview {
     pub requested: usize,
     pub items: Vec<RollbackPreviewItem>,
     pub failed: Vec<BatchOperationError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapDirectoryRuleUpdateResult {
+    pub rule: ArchiveMapDirectoryRule,
+    pub snapshot: ArchiveMapSnapshot,
+    pub audit_id: i64,
+    pub markdown_path: String,
+    pub status: String,
 }
 
 fn into_command_result<T>(result: crate::services::ServiceResult<T>) -> Result<T, String> {
@@ -445,6 +458,38 @@ pub fn get_archive_map(vault_path: String) -> Result<ArchiveMapSnapshot, String>
 #[tauri::command]
 pub fn rebuild_archive_map(vault_path: String) -> Result<ArchiveMapSnapshot, String> {
     into_command_result(ArchiveMapService::rebuild(&vault_path))
+}
+
+#[tauri::command]
+pub fn save_archive_map_directory_rule(
+    vault_path: String,
+    input: ArchiveMapDirectoryRuleInput,
+) -> Result<ArchiveMapDirectoryRuleUpdateResult, String> {
+    let rule = ArchiveMapService::upsert_directory_rule(&vault_path, input)
+        .map_err(|error| error.to_string())?;
+    let event = AuditService::record(
+        &vault_path,
+        "archive_map_rule_updated",
+        json!({
+            "relativePath": &rule.relative_path,
+            "locked": rule.locked,
+            "status": &rule.status,
+            "hasUserNote": !rule.user_note.trim().is_empty(),
+            "hasOrganizingHint": !rule.organizing_hint.trim().is_empty(),
+            "existsInCurrentMap": rule.exists_in_current_map,
+            "markdownPath": ARCHIVE_MAP_RULES_RELATIVE_PATH
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    let snapshot =
+        ArchiveMapService::latest_or_rebuild(&vault_path).map_err(|error| error.to_string())?;
+    Ok(ArchiveMapDirectoryRuleUpdateResult {
+        rule,
+        snapshot,
+        audit_id: event.id,
+        markdown_path: ARCHIVE_MAP_RULES_RELATIVE_PATH.to_string(),
+        status: "saved".to_string(),
+    })
 }
 
 #[tauri::command]

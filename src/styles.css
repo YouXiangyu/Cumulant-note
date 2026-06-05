@@ -2499,22 +2499,57 @@ kbd {
   gap: 8px;
 }
 
-.archive-map-list button {
-  align-items: flex-start;
+.archive-map-list article {
   background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-height: 54px;
+  display: grid;
+  gap: 9px;
   padding: 10px 12px;
   text-align: left;
 }
 
-.archive-map-list button:hover {
+.archive-map-list article:hover {
   border-color: var(--green);
+}
+
+.archive-map-list article.is-locked {
+  background: var(--green-wash);
+  border-color: #a9c9b2;
+}
+
+.archive-map-directory-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.archive-map-directory-row > div,
+.archive-map-rule-form {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.archive-map-directory-row .icon-soft-button {
+  border: 1px solid var(--border);
+}
+
+.archive-map-rule-form input[type="text"],
+.archive-map-rule-form textarea {
+  width: 100%;
+}
+
+.archive-map-lock-toggle {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.archive-map-lock-toggle input {
+  margin: 0;
 }
 
 .archive-map-list span,

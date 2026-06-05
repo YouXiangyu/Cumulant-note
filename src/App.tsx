@@ -66,6 +66,7 @@ import { marked } from "marked";
 import {
   AiOrganizePlan,
   AiOrganizeResult,
+  ArchiveMapDirectory,
   ArchiveMapSnapshot,
   AppSettings,
   AuditEvent,
@@ -121,6 +122,12 @@ interface AppError {
   title: string;
   detail: string;
   recovery: string;
+}
+
+interface ArchiveRuleDraft {
+  userNote: string;
+  organizingHint: string;
+  locked: boolean;
 }
 
 interface ProjectItem {
@@ -375,6 +382,8 @@ export default function App() {
   const [workerRunResult, setWorkerRunResult] = useState<WorkerRunResult | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
   const [archiveMap, setArchiveMap] = useState<ArchiveMapSnapshot | null>(null);
+  const [archiveRuleDrafts, setArchiveRuleDrafts] = useState<Record<string, ArchiveRuleDraft>>({});
+  const [archiveRuleSavingPath, setArchiveRuleSavingPath] = useState("");
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
   const [conflictActions, setConflictActions] = useState<Record<string, ConflictResolutionAction>>({});
@@ -1199,6 +1208,62 @@ export default function App() {
     if (!result) return;
     setArchiveMap(result);
     await refreshOperations(vaultPath);
+  }
+
+  function archiveRuleDraft(directory: ArchiveMapDirectory): ArchiveRuleDraft {
+    return (
+      archiveRuleDrafts[directory.relativePath] ?? {
+        userNote: directory.rule?.userNote ?? "",
+        organizingHint: directory.rule?.organizingHint ?? "",
+        locked: directory.rule?.locked ?? false,
+      }
+    );
+  }
+
+  function updateArchiveRuleDraft(directory: ArchiveMapDirectory, patch: Partial<ArchiveRuleDraft>) {
+    setArchiveRuleDrafts((current) => ({
+      ...current,
+      [directory.relativePath]: {
+        userNote: current[directory.relativePath]?.userNote ?? directory.rule?.userNote ?? "",
+        organizingHint:
+          current[directory.relativePath]?.organizingHint ?? directory.rule?.organizingHint ?? "",
+        locked: current[directory.relativePath]?.locked ?? directory.rule?.locked ?? false,
+        ...patch,
+      },
+    }));
+  }
+
+  async function saveArchiveRule(directory: ArchiveMapDirectory) {
+    if (!vaultPath) return;
+    const draft = archiveRuleDraft(directory);
+    setArchiveRuleSavingPath(directory.relativePath);
+    try {
+      const result = await run(
+        () =>
+          commands.saveArchiveMapDirectoryRule(vaultPath, {
+            relativePath: directory.relativePath,
+            userNote: draft.userNote,
+            organizingHint: draft.organizingHint,
+            locked: draft.locked,
+            status: "active",
+          }),
+        "保存 Archive Map 目录规则",
+        "目录规则已保存",
+      );
+      if (!result) return;
+      setArchiveMap(result.snapshot);
+      setArchiveRuleDrafts((current) => ({
+        ...current,
+        [directory.relativePath]: {
+          userNote: result.rule.userNote,
+          organizingHint: result.rule.organizingHint,
+          locked: result.rule.locked,
+        },
+      }));
+      await refreshOperations(vaultPath);
+    } finally {
+      setArchiveRuleSavingPath("");
+    }
   }
 
   async function runOrganize() {
@@ -2986,7 +3051,7 @@ export default function App() {
                 <div className={archiveMap.health.isStale ? "archive-map-health is-stale" : "archive-map-health"}>
                   <strong>{archiveMapHealthLabel(archiveMap.health.status)}</strong>
                   <span>
-                    缓存 {archiveMap.health.cachedDirectoryCount} · 当前 {archiveMap.health.currentDirectoryCount} · stale {archiveMap.health.staleDirectoryCount}
+                    缓存 {archiveMap.health.cachedDirectoryCount} · 当前 {archiveMap.health.currentDirectoryCount} · stale {archiveMap.health.staleDirectoryCount} · 锁定 {archiveMap.lockedDirectoryCount}
                   </span>
                   {archiveMap.health.staleReasons.length > 0 ? (
                     <small>{archiveMap.health.staleReasons.slice(0, 2).join(" · ")}</small>
@@ -2998,17 +3063,66 @@ export default function App() {
               <div className="archive-map-list">
                 {(archiveMap?.directories ?? []).slice(0, 5).map((directory) => {
                   const hitStat = archiveMap?.topHitDirectories.find((item) => item.relativePath === directory.relativePath);
+                  const draft = archiveRuleDraft(directory);
+                  const targetName = selectedInboxPath.split("/").pop() || "新文件.md";
                   return (
-                    <button
-                      type="button"
+                    <article
                       key={directory.relativePath}
-                      onClick={() => setTargetMovePath(`${directory.relativePath}/${selectedInboxPath.split("/").pop() || "新文件.md"}`)}
+                      className={draft.locked ? "is-locked" : undefined}
                     >
-                      <span>{directory.relativePath}</span>
-                      <small>
-                        {directory.fileCount} files · 历史引用 {hitStat?.moveCount ?? directory.historicalMoves} · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
-                      </small>
-                    </button>
+                      <div className="archive-map-directory-row">
+                        <div>
+                          <span>{directory.relativePath}</span>
+                          <small>
+                            {directory.fileCount} files · 历史引用 {hitStat?.moveCount ?? directory.historicalMoves} · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
+                          </small>
+                        </div>
+                        <button
+                          type="button"
+                          className="icon-soft-button"
+                          onClick={() => setTargetMovePath(`${directory.relativePath}/${targetName}`)}
+                          title="设为移动目标"
+                        >
+                          <ArrowRight size={15} aria-hidden="true" />
+                        </button>
+                      </div>
+                      <div className="archive-map-rule-form">
+                        <label className="archive-map-lock-toggle">
+                          <input
+                            type="checkbox"
+                            checked={draft.locked}
+                            onChange={(event) =>
+                              updateArchiveRuleDraft(directory, { locked: event.currentTarget.checked })
+                            }
+                          />
+                          <span>锁定目录规则</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={draft.userNote}
+                          placeholder="目录说明"
+                          onChange={(event) =>
+                            updateArchiveRuleDraft(directory, { userNote: event.currentTarget.value })
+                          }
+                        />
+                        <textarea
+                          value={draft.organizingHint}
+                          placeholder="整理提示"
+                          rows={2}
+                          onChange={(event) =>
+                            updateArchiveRuleDraft(directory, { organizingHint: event.currentTarget.value })
+                          }
+                        />
+                        <button
+                          type="button"
+                          className="secondary-button full-width"
+                          onClick={() => void saveArchiveRule(directory)}
+                          disabled={!vaultPath || archiveRuleSavingPath === directory.relativePath}
+                        >
+                          {archiveRuleSavingPath === directory.relativePath ? "保存中" : "保存规则"}
+                        </button>
+                      </div>
+                    </article>
                   );
                 })}
                 {archiveMap && archiveMap.directories.length === 0 ? (
@@ -3037,6 +3151,7 @@ export default function App() {
                 </div>
               ) : null}
               <small>{archiveMap?.markdownPath ?? ".thebrain/rules/archive-map.md"}</small>
+              <small>{archiveMap?.rulesMarkdownPath ?? ".thebrain/rules/archive-map-rules.md"}</small>
               {archiveMap?.isFallback ? <small>{archiveMap.fallbackReason}</small> : null}
             </section>
 

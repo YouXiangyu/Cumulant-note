@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const ARCHIVE_MAP_RELATIVE_PATH: &str = ".thebrain/rules/archive-map.md";
+pub const ARCHIVE_MAP_RULES_RELATIVE_PATH: &str = ".thebrain/rules/archive-map-rules.md";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +25,7 @@ pub struct ArchiveMapDirectory {
     pub sample_files: Vec<String>,
     pub keyword_hints: Vec<String>,
     pub historical_moves: usize,
+    pub rule: Option<ArchiveMapDirectoryRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +55,34 @@ pub struct ArchiveMapSnapshot {
     pub health: ArchiveMapHealth,
     pub stale_directories: Vec<ArchiveMapStaleDirectory>,
     pub top_hit_directories: Vec<ArchiveMapDirectoryHitStat>,
+    pub rules: Vec<ArchiveMapDirectoryRule>,
+    pub rules_markdown_path: String,
+    pub locked_directory_count: usize,
     pub markdown: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapDirectoryRule {
+    pub id: i64,
+    pub relative_path: String,
+    pub user_note: String,
+    pub organizing_hint: String,
+    pub locked: bool,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub exists_in_current_map: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMapDirectoryRuleInput {
+    pub relative_path: String,
+    pub user_note: Option<String>,
+    pub organizing_hint: Option<String>,
+    pub locked: Option<bool>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +181,12 @@ impl ArchiveMapService {
 
     pub fn markdown_context(vault_path: &str) -> ServiceResult<String> {
         let snapshot = Self::latest_or_rebuild(vault_path)?;
-        Ok(snapshot.markdown)
+        let rules_markdown = build_rules_markdown(&snapshot.rules);
+        if rules_markdown.trim().is_empty() {
+            Ok(snapshot.markdown)
+        } else {
+            Ok(format!("{}\n\n{}", snapshot.markdown, rules_markdown))
+        }
     }
 
     pub fn contains_directory(snapshot: &ArchiveMapSnapshot, relative_dir: &str) -> bool {
@@ -160,6 +194,88 @@ impl ArchiveMapService {
             .directories
             .iter()
             .any(|entry| entry.relative_path == relative_dir)
+    }
+
+    pub fn list_directory_rules(vault_path: &str) -> ServiceResult<Vec<ArchiveMapDirectoryRule>> {
+        let (root, connection) = open_connection(vault_path)?;
+        let current_paths = current_directory_paths(&root)?;
+        read_directory_rules(&connection, &current_paths, true)
+    }
+
+    pub fn upsert_directory_rule(
+        vault_path: &str,
+        input: ArchiveMapDirectoryRuleInput,
+    ) -> ServiceResult<ArchiveMapDirectoryRule> {
+        let (root, connection) = open_connection(vault_path)?;
+        let current_paths = current_directory_paths(&root)?;
+        let relative_path = validate_rule_directory(&current_paths, &input.relative_path)?;
+        let existing = directory_rule_by_path(&connection, &relative_path, &current_paths)?;
+        let now = Utc::now().to_rfc3339();
+        let user_note = input
+            .user_note
+            .map(|value| clean_rule_text(&value, 1200))
+            .or_else(|| existing.as_ref().map(|rule| rule.user_note.clone()))
+            .unwrap_or_default();
+        let organizing_hint = input
+            .organizing_hint
+            .map(|value| clean_rule_text(&value, 1200))
+            .or_else(|| existing.as_ref().map(|rule| rule.organizing_hint.clone()))
+            .unwrap_or_default();
+        let locked = input
+            .locked
+            .or_else(|| existing.as_ref().map(|rule| rule.locked))
+            .unwrap_or(false);
+        let status = validate_rule_status(
+            input
+                .status
+                .or_else(|| existing.as_ref().map(|rule| rule.status.clone()))
+                .unwrap_or_else(|| "active".to_string())
+                .as_str(),
+        )?;
+
+        match existing {
+            Some(rule) => {
+                connection.execute(
+                    "UPDATE archive_map_directory_rules
+                     SET user_note = ?1,
+                         organizing_hint = ?2,
+                         locked = ?3,
+                         status = ?4,
+                         updated_at = ?5
+                     WHERE id = ?6",
+                    params![
+                        user_note,
+                        organizing_hint,
+                        locked as i64,
+                        status,
+                        now,
+                        rule.id
+                    ],
+                )?;
+            }
+            None => {
+                connection.execute(
+                    "INSERT INTO archive_map_directory_rules
+                        (relative_path, user_note, organizing_hint, locked, status, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        &relative_path,
+                        &user_note,
+                        &organizing_hint,
+                        locked as i64,
+                        &status,
+                        &now,
+                        &now
+                    ],
+                )?;
+            }
+        }
+
+        let rules = read_directory_rules(&connection, &current_paths, true)?;
+        write_rules_markdown(&root, &rules)?;
+        directory_rule_by_path(&connection, &relative_path, &current_paths)?.ok_or_else(|| {
+            ServiceError::InvalidState("archive map rule was not persisted".to_string())
+        })
     }
 }
 
@@ -246,7 +362,14 @@ fn snapshot_by_run_id(
          ORDER BY relative_path",
     )?;
     let rows = statement.query_map(params![run_id], row_to_directory)?;
-    let directories = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut directories = rows.collect::<Result<Vec<_>, _>>()?;
+    let current_paths = current_directory_paths(root)?;
+    let rules = read_directory_rules(connection, &current_paths, true)?;
+    attach_directory_rules(&mut directories, &rules);
+    let locked_directory_count = rules
+        .iter()
+        .filter(|rule| rule.status == "active" && rule.locked && rule.exists_in_current_map)
+        .count();
     let markdown = fs::read_to_string(root.join(&run.markdown_path)).unwrap_or_default();
     let generated_at = run
         .finished_at
@@ -264,6 +387,9 @@ fn snapshot_by_run_id(
         health,
         stale_directories,
         top_hit_directories,
+        rules,
+        rules_markdown_path: ARCHIVE_MAP_RULES_RELATIVE_PATH.to_string(),
+        locked_directory_count,
         markdown,
         run,
     })
@@ -520,6 +646,128 @@ fn age_seconds(generated_at: &str) -> Option<i64> {
         })
 }
 
+fn current_directory_paths(root: &Path) -> ServiceResult<BTreeSet<String>> {
+    Ok(scan_formal_directories(root)?
+        .into_iter()
+        .map(|directory| directory.relative_path)
+        .collect())
+}
+
+fn read_directory_rules(
+    connection: &Connection,
+    current_paths: &BTreeSet<String>,
+    include_disabled: bool,
+) -> ServiceResult<Vec<ArchiveMapDirectoryRule>> {
+    let sql = if include_disabled {
+        "SELECT id, relative_path, user_note, organizing_hint, locked, status, created_at, updated_at
+         FROM archive_map_directory_rules
+         ORDER BY relative_path"
+    } else {
+        "SELECT id, relative_path, user_note, organizing_hint, locked, status, created_at, updated_at
+         FROM archive_map_directory_rules
+         WHERE status = 'active'
+         ORDER BY relative_path"
+    };
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([], |row| {
+        let relative_path: String = row.get(1)?;
+        Ok(ArchiveMapDirectoryRule {
+            id: row.get(0)?,
+            exists_in_current_map: current_paths.contains(&relative_path),
+            relative_path,
+            user_note: row.get(2)?,
+            organizing_hint: row.get(3)?,
+            locked: row.get::<_, i64>(4)? != 0,
+            status: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn directory_rule_by_path(
+    connection: &Connection,
+    relative_path: &str,
+    current_paths: &BTreeSet<String>,
+) -> ServiceResult<Option<ArchiveMapDirectoryRule>> {
+    connection
+        .query_row(
+            "SELECT id, relative_path, user_note, organizing_hint, locked, status, created_at, updated_at
+             FROM archive_map_directory_rules
+             WHERE relative_path = ?1",
+            params![relative_path],
+            |row| {
+                let stored_path: String = row.get(1)?;
+                Ok(ArchiveMapDirectoryRule {
+                    id: row.get(0)?,
+                    exists_in_current_map: current_paths.contains(&stored_path),
+                    relative_path: stored_path,
+                    user_note: row.get(2)?,
+                    organizing_hint: row.get(3)?,
+                    locked: row.get::<_, i64>(4)? != 0,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn attach_directory_rules(
+    directories: &mut [ArchiveMapDirectory],
+    rules: &[ArchiveMapDirectoryRule],
+) {
+    let active_rules = rules
+        .iter()
+        .filter(|rule| rule.status == "active")
+        .map(|rule| (rule.relative_path.as_str(), rule.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for directory in directories {
+        directory.rule = active_rules.get(directory.relative_path.as_str()).cloned();
+    }
+}
+
+fn validate_rule_directory(
+    current_paths: &BTreeSet<String>,
+    relative_path: &str,
+) -> ServiceResult<String> {
+    let normalized = normalize_relative_path(relative_path)?;
+    if !is_formal_relative_dir(&normalized) {
+        return Err(ServiceError::InvalidRelativePath(format!(
+            "{normalized} is not a formal archive directory"
+        )));
+    }
+    if !current_paths.contains(&normalized) {
+        return Err(ServiceError::InvalidRelativePath(format!(
+            "{normalized} is not in the current archive map"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn validate_rule_status(status: &str) -> ServiceResult<String> {
+    let normalized = status.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "active" | "disabled") {
+        Ok(normalized)
+    } else {
+        Err(ServiceError::InvalidState(format!(
+            "unsupported archive map rule status: {status}"
+        )))
+    }
+}
+
+fn clean_rule_text(value: &str, max_chars: usize) -> String {
+    let normalized = value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string();
+    normalized.chars().take(max_chars).collect()
+}
+
 fn run_by_id(connection: &Connection, run_id: i64) -> ServiceResult<ArchiveMapRun> {
     connection
         .query_row(
@@ -556,6 +804,7 @@ fn row_to_directory(row: &Row<'_>) -> rusqlite::Result<ArchiveMapDirectory> {
         sample_files: serde_json::from_str(&sample_files_json).unwrap_or_default(),
         keyword_hints: serde_json::from_str(&keyword_hints_json).unwrap_or_default(),
         historical_moves: row.get::<_, i64>(6)? as usize,
+        rule: None,
     })
 }
 
@@ -610,6 +859,7 @@ fn scan_dir(
             child_count: child_dirs.len(),
             sample_files,
             historical_moves: 0,
+            rule: None,
         });
     }
 
@@ -717,6 +967,60 @@ fn write_markdown(root: &Path, markdown: &str) -> ServiceResult<()> {
     Ok(())
 }
 
+fn build_rules_markdown(rules: &[ArchiveMapDirectoryRule]) -> String {
+    let active_rules = rules
+        .iter()
+        .filter(|rule| rule.status == "active")
+        .collect::<Vec<_>>();
+    if active_rules.is_empty() {
+        return String::new();
+    }
+
+    let generated_at = Utc::now().to_rfc3339();
+    let mut markdown = String::new();
+    markdown.push_str("# Archive Map Directory Rules\n\n");
+    markdown.push_str("> User-authored directory guidance for TheBrain. These rules are advisory and do not bypass Vault path safety, conflict checks, or overwrite protection.\n\n");
+    markdown.push_str(&format!("- Generated at: `{generated_at}`\n"));
+    markdown.push_str(&format!("- Active rules: `{}`\n\n", active_rules.len()));
+    markdown.push_str(
+        "| Directory | Locked | In Current Map | User Note | Organizing Hint | Updated |\n",
+    );
+    markdown.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for rule in active_rules {
+        markdown.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | `{}` |\n",
+            escape_cell(&rule.relative_path),
+            if rule.locked { "yes" } else { "no" },
+            if rule.exists_in_current_map {
+                "yes"
+            } else {
+                "no"
+            },
+            escape_cell(&single_line_cell(&rule.user_note)),
+            escape_cell(&single_line_cell(&rule.organizing_hint)),
+            escape_cell(&rule.updated_at)
+        ));
+    }
+    markdown
+}
+
+fn write_rules_markdown(root: &Path, rules: &[ArchiveMapDirectoryRule]) -> ServiceResult<()> {
+    let path = root.join(ARCHIVE_MAP_RULES_RELATIVE_PATH);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let markdown = build_rules_markdown(rules);
+    if markdown.trim().is_empty() {
+        fs::write(
+            path,
+            "# Archive Map Directory Rules\n\nNo active user directory rules yet.\n",
+        )?;
+    } else {
+        fs::write(path, markdown)?;
+    }
+    Ok(())
+}
+
 fn sorted_entries(path: &Path) -> ServiceResult<Vec<PathBuf>> {
     let mut entries = fs::read_dir(path)?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -804,6 +1108,15 @@ fn list_cell(values: &[String]) -> String {
 
 fn escape_cell(value: &str) -> String {
     value.replace('|', "\\|")
+}
+
+fn single_line_cell(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -956,5 +1269,100 @@ mod tests {
             .health
             .changed_directories
             .contains(&"100-School/AI".to_string()));
+    }
+
+    #[test]
+    fn archive_map_directory_rule_persists_attaches_and_updates_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+        fs::create_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+        fs::write(
+            temp.path().join("100-School").join("AI").join("notes.md"),
+            "hello",
+        )
+        .unwrap();
+        ArchiveMapService::rebuild(vault_path).unwrap();
+
+        let rule = ArchiveMapService::upsert_directory_rule(
+            vault_path,
+            ArchiveMapDirectoryRuleInput {
+                relative_path: "100-School/AI".to_string(),
+                user_note: Some("Keep exam notes together".to_string()),
+                organizing_hint: Some("Prefer course folders before generic topics".to_string()),
+                locked: Some(true),
+                status: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rule.relative_path, "100-School/AI");
+        assert!(rule.locked);
+        assert!(rule.exists_in_current_map);
+
+        let latest = ArchiveMapService::latest(vault_path).unwrap().unwrap();
+        let directory = latest
+            .directories
+            .iter()
+            .find(|directory| directory.relative_path == "100-School/AI")
+            .unwrap();
+        assert_eq!(latest.locked_directory_count, 1);
+        assert_eq!(
+            directory.rule.as_ref().map(|rule| rule.user_note.as_str()),
+            Some("Keep exam notes together")
+        );
+        assert_eq!(latest.rules_markdown_path, ARCHIVE_MAP_RULES_RELATIVE_PATH);
+
+        let rules_markdown =
+            fs::read_to_string(temp.path().join(ARCHIVE_MAP_RULES_RELATIVE_PATH)).unwrap();
+        assert!(rules_markdown.contains("Keep exam notes together"));
+        assert!(rules_markdown.contains("Prefer course folders before generic topics"));
+
+        let context = ArchiveMapService::markdown_context(vault_path).unwrap();
+        assert!(context.contains("Archive Map Directory Rules"));
+        assert!(context.contains("Keep exam notes together"));
+        assert!(context.contains("Prefer course folders before generic topics"));
+
+        let rebuilt = ArchiveMapService::rebuild(vault_path).unwrap();
+        let rebuilt_directory = rebuilt
+            .directories
+            .iter()
+            .find(|directory| directory.relative_path == "100-School/AI")
+            .unwrap();
+        assert!(rebuilt_directory.rule.as_ref().unwrap().locked);
+        assert_eq!(rebuilt.locked_directory_count, 1);
+    }
+
+    #[test]
+    fn archive_map_directory_rule_rejects_unsafe_or_non_current_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+        fs::create_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+        fs::create_dir_all(temp.path().join("dist").join("output")).unwrap();
+        ArchiveMapService::rebuild(vault_path).unwrap();
+
+        for relative_path in [
+            "../escape",
+            INBOX_DIR,
+            INTERNAL_DIR,
+            "dist/output",
+            "100-School/Missing",
+        ] {
+            let result = ArchiveMapService::upsert_directory_rule(
+                vault_path,
+                ArchiveMapDirectoryRuleInput {
+                    relative_path: relative_path.to_string(),
+                    user_note: Some("should fail".to_string()),
+                    organizing_hint: None,
+                    locked: Some(true),
+                    status: None,
+                },
+            );
+            assert!(
+                result.is_err(),
+                "expected archive map rule path to be rejected: {relative_path}"
+            );
+        }
     }
 }

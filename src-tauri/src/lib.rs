@@ -28,6 +28,7 @@ pub fn run() {
             commands::import_to_inbox,
             commands::get_archive_map,
             commands::rebuild_archive_map,
+            commands::save_archive_map_directory_rule,
             commands::get_ai_usage,
             commands::get_workspace_insights,
             commands::rebuild_rag_index,

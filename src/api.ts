@@ -183,6 +183,27 @@ export interface ArchiveMapDirectory {
   sampleFiles: string[];
   keywordHints: string[];
   historicalMoves: number;
+  rule?: ArchiveMapDirectoryRule;
+}
+
+export interface ArchiveMapDirectoryRule {
+  id: number;
+  relativePath: string;
+  userNote: string;
+  organizingHint: string;
+  locked: boolean;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  existsInCurrentMap: boolean;
+}
+
+export interface ArchiveMapDirectoryRuleInput {
+  relativePath: string;
+  userNote?: string;
+  organizingHint?: string;
+  locked?: boolean;
+  status?: string;
 }
 
 export interface ArchiveMapRun {
@@ -242,7 +263,18 @@ export interface ArchiveMapSnapshot extends CommandMeta {
   health: ArchiveMapHealth;
   staleDirectories: ArchiveMapStaleDirectory[];
   topHitDirectories: ArchiveMapDirectoryHitStat[];
+  rules: ArchiveMapDirectoryRule[];
+  rulesMarkdownPath: string;
+  lockedDirectoryCount: number;
   markdown: string;
+}
+
+export interface ArchiveMapDirectoryRuleUpdateResult extends CommandMeta {
+  rule: ArchiveMapDirectoryRule;
+  snapshot: ArchiveMapSnapshot;
+  auditId: number;
+  markdownPath: string;
+  status: string;
 }
 
 export interface InboxImportResult extends CommandMeta {
@@ -1015,7 +1047,36 @@ function fallbackArchiveMap(reason: string): ArchiveMapSnapshot {
     },
     staleDirectories: [],
     topHitDirectories: [],
+    rules: [],
+    rulesMarkdownPath: ".thebrain/rules/archive-map-rules.md",
+    lockedDirectoryCount: 0,
     markdown: "",
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackArchiveRuleUpdate(
+  input: ArchiveMapDirectoryRuleInput,
+  reason: string,
+): ArchiveMapDirectoryRuleUpdateResult {
+  const now = nowIso();
+  return {
+    rule: {
+      id: 0,
+      relativePath: input.relativePath,
+      userNote: input.userNote ?? "",
+      organizingHint: input.organizingHint ?? "",
+      locked: input.locked ?? false,
+      status: input.status ?? "active",
+      createdAt: now,
+      updatedAt: now,
+      existsInCurrentMap: false,
+    },
+    snapshot: fallbackArchiveMap(reason),
+    auditId: 0,
+    markdownPath: ".thebrain/rules/archive-map-rules.md",
+    status: "fallback",
     isFallback: true,
     fallbackReason: reason,
   };
@@ -1946,6 +2007,12 @@ export const commands = {
     invokeWithFallback<ArchiveMapSnapshot>("get_archive_map", { vaultPath }, fallbackArchiveMap),
   rebuildArchiveMap: (vaultPath: string) =>
     invokeWithFallback<ArchiveMapSnapshot>("rebuild_archive_map", { vaultPath }, fallbackArchiveMap),
+  saveArchiveMapDirectoryRule: (vaultPath: string, input: ArchiveMapDirectoryRuleInput) =>
+    invokeWithFallback<ArchiveMapDirectoryRuleUpdateResult>(
+      "save_archive_map_directory_rule",
+      { vaultPath, input },
+      (reason) => fallbackArchiveRuleUpdate(input, reason),
+    ),
   importToInbox: (vaultPath: string, sourcePaths: string[], mode: "copy" | "move" = "copy") =>
     invokeWithFallback<InboxImportResult[]>(
       "import_to_inbox",

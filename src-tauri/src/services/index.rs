@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-            VALUES ('schema_version', '7', ?1)
+            VALUES ('schema_version', '8', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 7;
+            PRAGMA user_version = 8;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -215,6 +215,19 @@ impl IndexService {
             );
             CREATE INDEX IF NOT EXISTS idx_archive_map_entries_run_path
                 ON archive_map_entries(run_id, relative_path);
+
+            CREATE TABLE IF NOT EXISTS archive_map_directory_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT NOT NULL UNIQUE,
+                user_note TEXT NOT NULL DEFAULT '',
+                organizing_hint TEXT NOT NULL DEFAULT '',
+                locked INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_archive_map_directory_rules_status
+                ON archive_map_directory_rules(status, updated_at);
 
             CREATE TABLE IF NOT EXISTS action_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -475,6 +488,7 @@ mod tests {
                     'conflict_rule_hits',
                     'archive_map_runs',
                     'archive_map_entries',
+                    'archive_map_directory_rules',
                     'action_candidates',
                     'todo_items',
                     'schedule_items',
@@ -492,6 +506,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 26);
+        assert_eq!(table_count, 27);
     }
 }
