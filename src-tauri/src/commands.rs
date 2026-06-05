@@ -5,7 +5,7 @@ use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
 use crate::services::archive_map::{ArchiveMapService, ArchiveMapSnapshot};
-use crate::services::audit::{AuditEvent, AuditService};
+use crate::services::audit::{AuditEvent, AuditEventSearchResult, AuditSearchQuery, AuditService};
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
 use crate::services::conflict_rules::{
@@ -18,7 +18,7 @@ use crate::services::inbox::{InboxItem, InboxService};
 use crate::services::ledger::{LedgerItem, LedgerService};
 use crate::services::listener::{ListenerService, DEFAULT_LISTENER_STABLE_WAIT_MS};
 use crate::services::markdown::{MarkdownDocument, MarkdownExport, MarkdownService};
-use crate::services::movement::{MoveLog, MoveRequest, MovementService};
+use crate::services::movement::{MoveLog, MoveRequest, MovementService, RollbackPreviewItem};
 use crate::services::queue::{ListenerState, QueueItem, QueueService};
 use crate::services::rag::{
     RagAnswer, RagConversation, RagConversationSummary, RagIndexRun, RagIndexStatus, RagService,
@@ -125,7 +125,7 @@ pub struct InboxPlanResult {
     pub budget: BudgetStatus,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchOperationError {
     pub id: i64,
@@ -145,6 +145,36 @@ pub struct BatchQueueResult {
 pub struct BatchRollbackResult {
     pub requested: usize,
     pub rolled_back: Vec<MoveLog>,
+    pub failed: Vec<BatchOperationError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueRecoveryPreviewItem {
+    pub id: i64,
+    pub eligible: bool,
+    pub current_status: String,
+    pub kind: String,
+    pub relative_path: String,
+    pub effect: String,
+    pub blocking_reason: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchQueueRecoveryPreview {
+    pub requested: usize,
+    pub action: String,
+    pub items: Vec<QueueRecoveryPreviewItem>,
+    pub failed: Vec<BatchOperationError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRollbackPreview {
+    pub requested: usize,
+    pub items: Vec<RollbackPreviewItem>,
     pub failed: Vec<BatchOperationError>,
 }
 
@@ -169,6 +199,47 @@ fn sanitize_batch_ids(ids: Vec<i64>) -> Result<Vec<i64>, String> {
         return Err("batch operations are limited to 50 items".to_string());
     }
     Ok(cleaned)
+}
+
+fn queue_recovery_preview_item(action: &str, item: QueueItem) -> QueueRecoveryPreviewItem {
+    let mut warnings = Vec::new();
+    if item.status == "running" {
+        warnings
+            .push("item is currently marked running; execution will revalidate state".to_string());
+    }
+    let eligible = match action {
+        "retry" => matches!(item.status.as_str(), "failed" | "conflict" | "running"),
+        "skip" => matches!(
+            item.status.as_str(),
+            "pending" | "failed" | "conflict" | "running"
+        ),
+        _ => false,
+    };
+    let blocking_reason = if eligible {
+        None
+    } else if action == "retry" || action == "skip" {
+        Some(format!(
+            "queue item {} with status {} is not {action}able",
+            item.id, item.status
+        ))
+    } else {
+        Some(format!("unsupported queue recovery action: {action}"))
+    };
+    let effect = match action {
+        "retry" if eligible => "will reset status to pending and clear lock/run_after".to_string(),
+        "skip" if eligible => "will mark item skipped and store the skipped reason".to_string(),
+        _ => "no change will be made".to_string(),
+    };
+    QueueRecoveryPreviewItem {
+        id: item.id,
+        eligible,
+        current_status: item.status,
+        kind: item.kind,
+        relative_path: item.relative_path,
+        effect,
+        blocking_reason,
+        warnings,
+    }
 }
 
 fn resolve_resident_worker_options(
@@ -657,6 +728,36 @@ pub fn skip_queue_item(
 }
 
 #[tauri::command]
+pub fn preview_queue_recovery(
+    vault_path: String,
+    action: String,
+    queue_ids: Vec<i64>,
+) -> Result<BatchQueueRecoveryPreview, String> {
+    let action = action.trim().to_ascii_lowercase();
+    if !matches!(action.as_str(), "retry" | "skip") {
+        return Err(format!("unsupported queue recovery action: {action}"));
+    }
+    let ids = sanitize_batch_ids(queue_ids)?;
+    let mut items = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        match QueueService::get(&vault_path, *id) {
+            Ok(item) => items.push(queue_recovery_preview_item(&action, item)),
+            Err(error) => failed.push(BatchOperationError {
+                id: *id,
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok(BatchQueueRecoveryPreview {
+        requested: ids.len(),
+        action,
+        items,
+        failed,
+    })
+}
+
+#[tauri::command]
 pub fn retry_queue_items(
     vault_path: String,
     queue_ids: Vec<i64>,
@@ -990,6 +1091,30 @@ pub fn rollback_moves(
 }
 
 #[tauri::command]
+pub fn preview_rollback_moves(
+    vault_path: String,
+    movement_ids: Vec<i64>,
+) -> Result<BatchRollbackPreview, String> {
+    let ids = sanitize_batch_ids(movement_ids)?;
+    let mut items = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        match MovementService::preview_rollback(&vault_path, *id) {
+            Ok(item) => items.push(item),
+            Err(error) => failed.push(BatchOperationError {
+                id: *id,
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok(BatchRollbackPreview {
+        requested: ids.len(),
+        items,
+        failed,
+    })
+}
+
+#[tauri::command]
 pub fn list_audit_events(
     vault_path: String,
     event_type: Option<String>,
@@ -1000,6 +1125,14 @@ pub fn list_audit_events(
         event_type.as_deref(),
         limit,
     ))
+}
+
+#[tauri::command]
+pub fn search_audit_events(
+    vault_path: String,
+    query: AuditSearchQuery,
+) -> Result<AuditEventSearchResult, String> {
+    into_command_result(AuditService::search(&vault_path, query))
 }
 
 #[tauri::command]
@@ -1361,6 +1494,9 @@ fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::queue::{QueueItemInput, QueueService};
+    use crate::services::vault::{VaultService, INBOX_DIR};
+    use std::fs;
 
     #[test]
     fn resident_worker_options_stay_conservative() {
@@ -1381,5 +1517,60 @@ mod tests {
         assert!(sanitize_batch_ids(vec![]).is_err());
         assert!(sanitize_batch_ids(vec![0]).is_err());
         assert!(sanitize_batch_ids((1..=51).collect()).is_err());
+    }
+
+    #[test]
+    fn queue_recovery_preview_is_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap().to_string();
+        VaultService::init(&vault_path).unwrap();
+        let item = QueueService::enqueue(
+            &vault_path,
+            QueueItemInput {
+                kind: "inbox_file_changed".to_string(),
+                relative_path: format!("{INBOX_DIR}/a.md"),
+                dedupe_key: None,
+                payload: Some(json!({"source": "test"})),
+                max_attempts: None,
+                run_after: None,
+            },
+        )
+        .unwrap();
+        QueueService::finish(&vault_path, item.id, "failed", Some("boom")).unwrap();
+
+        let preview =
+            preview_queue_recovery(vault_path.clone(), "retry".to_string(), vec![item.id]).unwrap();
+        assert_eq!(preview.requested, 1);
+        assert_eq!(preview.items.len(), 1);
+        assert!(preview.items[0].eligible);
+        assert_eq!(preview.items[0].current_status, "failed");
+        assert_eq!(
+            QueueService::get(&vault_path, item.id).unwrap().status,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn rollback_preview_command_does_not_move_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap().to_string();
+        VaultService::init(&vault_path).unwrap();
+        fs::write(temp.path().join(INBOX_DIR).join("a.md"), "source").unwrap();
+        let log = MovementService::move_from_inbox(
+            &vault_path,
+            MoveRequest {
+                source_relative_path: format!("{INBOX_DIR}/a.md"),
+                target_relative_path: "100-School/a.md".to_string(),
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        let preview = preview_rollback_moves(vault_path.clone(), vec![log.id]).unwrap();
+        assert_eq!(preview.requested, 1);
+        assert_eq!(preview.items.len(), 1);
+        assert!(preview.items[0].eligible);
+        assert!(temp.path().join("100-School").join("a.md").exists());
+        assert!(!temp.path().join(INBOX_DIR).join("a.md").exists());
     }
 }

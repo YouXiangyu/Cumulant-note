@@ -182,6 +182,11 @@ impl QueueService {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn get(vault_path: &str, id: i64) -> ServiceResult<QueueItem> {
+        let connection = open_index_for_vault(vault_path)?;
+        get_queue_item(&connection, id)
+    }
+
     pub fn claim_next(vault_path: &str) -> ServiceResult<Option<QueueItem>> {
         let connection = open_index_for_vault(vault_path)?;
         let now = Utc::now().to_rfc3339();

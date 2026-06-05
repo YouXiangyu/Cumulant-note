@@ -35,6 +35,22 @@ pub struct MoveLog {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackPreviewItem {
+    pub id: i64,
+    pub eligible: bool,
+    pub status: String,
+    pub current_file_relative_path: String,
+    pub restore_relative_path: String,
+    pub current_file_exists: bool,
+    pub restore_target_exists: bool,
+    pub would_move: bool,
+    pub would_append_ledger: bool,
+    pub blocking_reason: Option<String>,
+    pub warnings: Vec<String>,
+}
+
 pub struct MovementService;
 
 impl MovementService {
@@ -162,6 +178,59 @@ impl MovementService {
         )?;
         let rows = statement.query_map([], row_to_move_log)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_log(vault_path: &str, movement_id: i64) -> ServiceResult<MoveLog> {
+        Self::get(vault_path, movement_id)
+    }
+
+    pub fn preview_rollback(
+        vault_path: &str,
+        movement_id: i64,
+    ) -> ServiceResult<RollbackPreviewItem> {
+        let log = Self::get(vault_path, movement_id)?;
+        let root = canonical_vault_root(vault_path)?;
+        let current_relative_path = normalize_relative_path(&log.target_relative_path)?;
+        let restore_relative_path = normalize_relative_path(&log.source_relative_path)?;
+        let current_file_path = root.join(&current_relative_path);
+        let restore_target_path = root.join(&restore_relative_path);
+        let current_file_exists = current_file_path.exists();
+        let restore_target_exists = restore_target_path.exists();
+        let mut warnings = Vec::new();
+        if let Some(parent) = restore_target_path.parent() {
+            if !parent.exists() {
+                warnings.push(
+                    "restore parent directory will be created if rollback is confirmed".to_string(),
+                );
+            }
+        }
+        let blocking_reason = if log.status != "moved" {
+            Some(format!("movement {movement_id} is not rollbackable"))
+        } else if !current_file_exists {
+            Some(format!(
+                "current moved file is missing: {current_relative_path}"
+            ))
+        } else if restore_target_exists {
+            Some(format!(
+                "restore target already exists: {restore_relative_path}"
+            ))
+        } else {
+            None
+        };
+        let eligible = blocking_reason.is_none();
+        Ok(RollbackPreviewItem {
+            id: movement_id,
+            eligible,
+            status: log.status,
+            current_file_relative_path: current_relative_path,
+            restore_relative_path,
+            current_file_exists,
+            restore_target_exists,
+            would_move: eligible,
+            would_append_ledger: eligible,
+            blocking_reason,
+            warnings,
+        })
     }
 
     fn get(vault_path: &str, movement_id: i64) -> ServiceResult<MoveLog> {
@@ -503,5 +572,37 @@ mod tests {
         assert!(ensure_movable_inbox_source("100-School/a.md").is_err());
         assert!(ensure_movable_inbox_source("000-收集箱/收集箱-已整理.md").is_err());
         assert!(ensure_movable_inbox_source("../outside.md").is_err());
+    }
+
+    #[test]
+    fn rollback_preview_is_read_only_and_reports_blockers() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+        fs::write(temp.path().join(INBOX_DIR).join("a.md"), "source").unwrap();
+
+        let log = MovementService::move_from_inbox(
+            vault_path,
+            MoveRequest {
+                source_relative_path: "000-收集箱/a.md".to_string(),
+                target_relative_path: "100-School/a.md".to_string(),
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        let preview = MovementService::preview_rollback(vault_path, log.id).unwrap();
+        assert!(preview.eligible);
+        assert!(preview.current_file_exists);
+        assert!(!preview.restore_target_exists);
+        assert!(preview.would_move);
+        assert!(temp.path().join("100-School").join("a.md").exists());
+
+        fs::write(temp.path().join(INBOX_DIR).join("a.md"), "new source").unwrap();
+        let blocked = MovementService::preview_rollback(vault_path, log.id).unwrap();
+        assert!(!blocked.eligible);
+        assert!(blocked.restore_target_exists);
+        assert!(blocked.blocking_reason.unwrap().contains("already exists"));
+        assert!(temp.path().join("100-School").join("a.md").exists());
     }
 }

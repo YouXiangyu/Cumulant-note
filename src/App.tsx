@@ -69,6 +69,8 @@ import {
   ArchiveMapSnapshot,
   AppSettings,
   AuditEvent,
+  BatchQueueRecoveryPreview,
+  BatchRollbackPreview,
   BudgetStatus,
   commands,
   ConflictItem,
@@ -111,6 +113,9 @@ import {
 type ViewId = "dashboard" | "inbox" | "markdown" | "notes" | "personal" | "project" | "settings";
 type ImportBehavior = "copy" | "move";
 type RagScopeKind = RagScope["kind"];
+type BatchRecoveryPreviewState =
+  | { kind: "queue-retry" | "queue-skip"; preview: BatchQueueRecoveryPreview }
+  | { kind: "rollback"; preview: BatchRollbackPreview };
 
 interface AppError {
   title: string;
@@ -367,6 +372,9 @@ export default function App() {
   const [conflictRuleDrafts, setConflictRuleDrafts] = useState<Record<number, Partial<ConflictRule>>>({});
   const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditSearchText, setAuditSearchText] = useState("");
+  const [auditEventTypeFilter, setAuditEventTypeFilter] = useState("");
+  const [batchRecoveryPreview, setBatchRecoveryPreview] = useState<BatchRecoveryPreviewState | null>(null);
   const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [todoScheduleItems, setTodoScheduleItems] = useState<TodoScheduleItem[]>([]);
@@ -608,6 +616,10 @@ export default function App() {
           sizeBytes: 0,
           modifiedAt: undefined,
         }));
+  const auditEventTypes = useMemo(
+    () => Array.from(new Set(auditEvents.map((event) => event.eventType).filter(Boolean))).sort(),
+    [auditEvents],
+  );
 
   useEffect(() => {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
@@ -1016,31 +1028,39 @@ export default function App() {
     await refreshOperations(vaultPath);
   }
 
-  async function retryVisibleQueueIssues() {
+  async function previewQueueRecovery(action: "retry" | "skip") {
     if (!vaultPath) return;
     const ids = recoveryQueueItems.slice(0, 50).map((item) => item.id);
     if (ids.length === 0) return;
     const result = await run(
-      () => commands.retryQueueItems(vaultPath, ids),
-      "批量重试队列项",
-      "批量重试已完成",
+      () => commands.previewQueueRecovery(vaultPath, action, ids),
+      action === "retry" ? "预览批量重试" : "预览批量跳过",
+      "批量恢复预览已生成",
     );
     if (!result) return;
-    setStatus(`批量重试完成：成功 ${result.succeeded.length}，失败 ${result.failed.length}`);
-    await refreshOperations(vaultPath);
+    setBatchRecoveryPreview({
+      kind: action === "retry" ? "queue-retry" : "queue-skip",
+      preview: result,
+    });
   }
 
-  async function skipVisibleQueueIssues() {
+  async function confirmQueueRecoveryPreview(preview: BatchQueueRecoveryPreview) {
     if (!vaultPath) return;
-    const ids = recoveryQueueItems.slice(0, 50).map((item) => item.id);
+    const ids = preview.items.filter((item) => item.eligible).map((item) => item.id);
     if (ids.length === 0) return;
     const result = await run(
-      () => commands.skipQueueItems(vaultPath, ids, "batch skipped from inbox status panel"),
-      "批量跳过队列项",
-      "批量跳过已完成",
+      () =>
+        preview.action === "skip"
+          ? commands.skipQueueItems(vaultPath, ids, "batch skipped from inbox status panel")
+          : commands.retryQueueItems(vaultPath, ids),
+      preview.action === "skip" ? "批量跳过队列项" : "批量重试队列项",
+      preview.action === "skip" ? "批量跳过已完成" : "批量重试已完成",
     );
     if (!result) return;
-    setStatus(`批量跳过完成：成功 ${result.succeeded.length}，失败 ${result.failed.length}`);
+    setStatus(
+      `${preview.action === "skip" ? "批量跳过" : "批量重试"}完成：成功 ${result.succeeded.length}，失败 ${result.failed.length}`,
+    );
+    setBatchRecoveryPreview(null);
     await refreshOperations(vaultPath);
   }
 
@@ -1055,9 +1075,22 @@ export default function App() {
     await refresh(vaultPath);
   }
 
-  async function rollbackVisibleMoveLogs() {
+  async function previewVisibleMoveLogRollback() {
     if (!vaultPath) return;
     const ids = rollbackableMoveLogs.map((log) => log.id);
+    if (ids.length === 0) return;
+    const result = await run(
+      () => commands.previewRollbackMoves(vaultPath, ids),
+      "预览批量回滚",
+      "批量回滚预览已生成",
+    );
+    if (!result) return;
+    setBatchRecoveryPreview({ kind: "rollback", preview: result });
+  }
+
+  async function confirmRollbackPreview(preview: BatchRollbackPreview) {
+    if (!vaultPath) return;
+    const ids = preview.items.filter((item) => item.eligible).map((item) => item.id);
     if (ids.length === 0) return;
     const result = await run(
       () => commands.rollbackMoves(vaultPath, ids),
@@ -1066,6 +1099,7 @@ export default function App() {
     );
     if (!result) return;
     setStatus(`批量回滚完成：成功 ${result.rolledBack.length}，失败 ${result.failed.length}`);
+    setBatchRecoveryPreview(null);
     await refresh(vaultPath);
   }
 
@@ -1231,6 +1265,36 @@ export default function App() {
       fallbackReason: result.fallbackReason,
     });
     await refresh(vaultPath);
+  }
+
+  async function applyAuditSearch() {
+    if (!vaultPath) return;
+    const result = await run(
+      () =>
+        commands.searchAuditEvents(vaultPath, {
+          text: auditSearchText.trim() || undefined,
+          eventTypes: auditEventTypeFilter ? [auditEventTypeFilter] : undefined,
+          limit: 80,
+        }),
+      "搜索 audit timeline",
+      "audit timeline 已筛选",
+    );
+    if (!result) return;
+    setAuditEvents(result.events);
+    setStatus(`audit 筛选完成：${result.events.length} / limit ${result.appliedLimit}`);
+  }
+
+  async function resetAuditSearch() {
+    if (!vaultPath) return;
+    setAuditSearchText("");
+    setAuditEventTypeFilter("");
+    const events = await run(
+      () => commands.listAuditEvents(vaultPath, 30),
+      "重置 audit timeline",
+      "audit timeline 已重置",
+    );
+    if (!events) return;
+    setAuditEvents(events);
   }
 
   async function confirmCandidate(candidate: TodoScheduleCandidate) {
@@ -1718,6 +1782,72 @@ export default function App() {
     return parts.length > 0 ? parts.join(" · ") : "无详细摘要";
   }
 
+  function renderQueueRecoveryPreview() {
+    if (!batchRecoveryPreview || batchRecoveryPreview.kind === "rollback") return null;
+    const preview = batchRecoveryPreview.preview;
+    const eligibleCount = preview.items.filter((item) => item.eligible).length;
+    return (
+      <div className="batch-preview">
+        <div>
+          <strong>{preview.action === "skip" ? "批量跳过预览" : "批量重试预览"}</strong>
+          <span>尚未执行；确认后只会处理 {eligibleCount} / {preview.requested} 个 eligible 队列项。</span>
+          {preview.failed.length > 0 ? <small>读取失败 {preview.failed.length} 项，确认时不会处理这些项。</small> : null}
+        </div>
+        <div className="batch-preview-list">
+          {preview.items.slice(0, 6).map((item) => (
+            <article key={item.id} className={item.eligible ? undefined : "is-blocked"}>
+              <span>#{item.id} {item.currentStatus}</span>
+              <strong>{item.relativePath}</strong>
+              <small>{item.eligible ? item.effect : item.blockingReason}</small>
+              {item.warnings.length > 0 ? <em>{item.warnings.join(" · ")}</em> : null}
+            </article>
+          ))}
+        </div>
+        <div className="recovery-action-row">
+          <button type="button" className="secondary-button" onClick={() => confirmQueueRecoveryPreview(preview)} disabled={eligibleCount === 0}>
+            确认执行
+          </button>
+          <button type="button" className="ghost-button" onClick={() => setBatchRecoveryPreview(null)}>
+            取消预览
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderRollbackPreview() {
+    if (!batchRecoveryPreview || batchRecoveryPreview.kind !== "rollback") return null;
+    const preview = batchRecoveryPreview.preview;
+    const eligibleCount = preview.items.filter((item) => item.eligible).length;
+    return (
+      <div className="batch-preview">
+        <div>
+          <strong>批量回滚预览</strong>
+          <span>尚未执行；确认后只会回滚 {eligibleCount} / {preview.requested} 条 eligible movement log。</span>
+          {preview.failed.length > 0 ? <small>读取失败 {preview.failed.length} 条，确认时不会处理这些项。</small> : null}
+        </div>
+        <div className="batch-preview-list">
+          {preview.items.slice(0, 6).map((item) => (
+            <article key={item.id} className={item.eligible ? undefined : "is-blocked"}>
+              <span>#{item.id} {item.status}</span>
+              <strong>{item.currentFileRelativePath} {"->"} {item.restoreRelativePath}</strong>
+              <small>{item.eligible ? "将移动回原收集箱路径并追加 ledger" : item.blockingReason}</small>
+              {item.warnings.length > 0 ? <em>{item.warnings.join(" · ")}</em> : null}
+            </article>
+          ))}
+        </div>
+        <div className="recovery-action-row">
+          <button type="button" className="secondary-button" onClick={() => confirmRollbackPreview(preview)} disabled={eligibleCount === 0}>
+            确认回滚
+          </button>
+          <button type="button" className="ghost-button" onClick={() => setBatchRecoveryPreview(null)}>
+            取消预览
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   function renderInboxStatusPanel() {
     const issueItems = recoveryQueueItems.slice(0, 6);
     const recentEvent =
@@ -1787,14 +1917,15 @@ export default function App() {
         </div>
         {recoveryQueueItems.length > 0 ? (
           <div className="recovery-action-row">
-            <button type="button" className="secondary-button" onClick={retryVisibleQueueIssues} disabled={!vaultPath}>
-              批量重试当前问题
+            <button type="button" className="secondary-button" onClick={() => previewQueueRecovery("retry")} disabled={!vaultPath}>
+              预览批量重试
             </button>
-            <button type="button" className="ghost-button" onClick={skipVisibleQueueIssues} disabled={!vaultPath}>
-              批量跳过当前问题
+            <button type="button" className="ghost-button" onClick={() => previewQueueRecovery("skip")} disabled={!vaultPath}>
+              预览批量跳过
             </button>
           </div>
         ) : null}
+        {renderQueueRecoveryPreview()}
         {issueItems.length > 0 ? (
           <div className="queue-issue-list">
             {issueItems.map((item) => (
@@ -1871,13 +2002,14 @@ export default function App() {
             <button
               type="button"
               className="secondary-button"
-              onClick={rollbackVisibleMoveLogs}
+              onClick={previewVisibleMoveLogRollback}
               disabled={!vaultPath || rollbackableMoveLogs.length === 0}
             >
-              批量回滚可回滚项
+              预览批量回滚
             </button>
           </div>
         </div>
+        {renderRollbackPreview()}
         {recentLogs.length > 0 ? (
           <div className="movement-log-list">
             {recentLogs.map((log) => (
@@ -1910,6 +2042,9 @@ export default function App() {
 
   function renderAuditTimelinePanel() {
     const recentEvents = auditEvents.slice(0, 12);
+    const filterTypes = auditEventTypeFilter && !auditEventTypes.includes(auditEventTypeFilter)
+      ? [auditEventTypeFilter, ...auditEventTypes]
+      : auditEventTypes;
     return (
       <section className="concept-card audit-timeline-card">
         <div className="card-heading">
@@ -1919,6 +2054,31 @@ export default function App() {
           </h3>
           <span>{auditEvents.length} 条最近事件</span>
         </div>
+        <div className="audit-filter-row">
+          <input
+            value={auditSearchText}
+            onChange={(event) => setAuditSearchText(event.target.value)}
+            placeholder="搜索事件、路径、状态或 payload"
+            aria-label="搜索 audit timeline"
+          />
+          <select
+            value={auditEventTypeFilter}
+            onChange={(event) => setAuditEventTypeFilter(event.target.value)}
+            aria-label="按 audit 类型筛选"
+          >
+            <option value="">全部类型</option>
+            {filterTypes.map((eventType) => (
+              <option value={eventType} key={eventType}>{eventType}</option>
+            ))}
+          </select>
+          <button type="button" className="secondary-button" onClick={applyAuditSearch} disabled={!vaultPath}>
+            应用筛选
+          </button>
+          <button type="button" className="ghost-button" onClick={resetAuditSearch} disabled={!vaultPath}>
+            重置
+          </button>
+        </div>
+        <p className="insights-note muted">筛选结果来自 `.thebrain/index.sqlite` audit_events；当前 UI 仍只展示前 12 条。</p>
         {recentEvents.length > 0 ? (
           <div className="audit-timeline-list">
             {recentEvents.map((event) => (

@@ -1171,6 +1171,72 @@ textarea:focus {
   gap: 9px;
 }
 
+.audit-filter-row {
+  display: grid;
+  gap: 9px;
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) auto auto;
+}
+
+.audit-filter-row input,
+.audit-filter-row select {
+  min-width: 0;
+}
+
+.batch-preview {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.batch-preview > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.batch-preview span,
+.batch-preview small {
+  color: var(--muted);
+}
+
+.batch-preview-list {
+  display: grid;
+  gap: 8px;
+}
+
+.batch-preview-list article {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.batch-preview-list article.is-blocked {
+  background: #fff1f0;
+  border-color: #f1beb8;
+}
+
+.batch-preview-list strong,
+.batch-preview-list span,
+.batch-preview-list small,
+.batch-preview-list em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-preview-list em {
+  color: var(--amber);
+  font-size: 12px;
+  font-style: normal;
+}
+
 .queue-issue-list,
 .movement-log-list,
 .audit-timeline-list {
@@ -2470,6 +2536,7 @@ kbd {
   .rag-stats,
   .status-metric-grid,
   .status-event-grid,
+  .audit-filter-row,
   .editor-preview-grid,
   .move-grid,
   .stats-ribbon,

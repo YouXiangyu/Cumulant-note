@@ -448,9 +448,67 @@ export interface AuditEvent extends CommandMeta {
   createdAt: string;
 }
 
+export interface AuditSearchQuery {
+  eventTypes?: string[];
+  text?: string;
+  sourceRelativePath?: string;
+  targetRelativePath?: string;
+  queueId?: number;
+  movementId?: number;
+  status?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  limit?: number;
+  beforeId?: number;
+}
+
+export interface AuditEventSearchResult extends CommandMeta {
+  events: AuditEvent[];
+  nextBeforeId?: number;
+  appliedLimit: number;
+}
+
 export interface BatchOperationError {
   id: number;
   message: string;
+}
+
+export interface QueueRecoveryPreviewItem extends CommandMeta {
+  id: number;
+  eligible: boolean;
+  currentStatus: string;
+  kind: string;
+  relativePath: string;
+  effect: string;
+  blockingReason?: string;
+  warnings: string[];
+}
+
+export interface BatchQueueRecoveryPreview extends CommandMeta {
+  requested: number;
+  action: "retry" | "skip" | string;
+  items: QueueRecoveryPreviewItem[];
+  failed: BatchOperationError[];
+}
+
+export interface RollbackPreviewItem extends CommandMeta {
+  id: number;
+  eligible: boolean;
+  status: string;
+  currentFileRelativePath: string;
+  restoreRelativePath: string;
+  currentFileExists: boolean;
+  restoreTargetExists: boolean;
+  wouldMove: boolean;
+  wouldAppendLedger: boolean;
+  blockingReason?: string;
+  warnings: string[];
+}
+
+export interface BatchRollbackPreview extends CommandMeta {
+  requested: number;
+  items: RollbackPreviewItem[];
+  failed: BatchOperationError[];
 }
 
 export interface BatchQueueResult extends CommandMeta {
@@ -1467,6 +1525,16 @@ function normalizeAuditEvent(raw: any): AuditEvent {
   };
 }
 
+function normalizeAuditSearchResult(raw: any): AuditEventSearchResult {
+  return {
+    events: Array.isArray(raw?.events) ? raw.events.map(normalizeAuditEvent) : [],
+    nextBeforeId: raw?.nextBeforeId ?? raw?.next_before_id,
+    appliedLimit: toNumber(raw?.appliedLimit ?? raw?.applied_limit, 0),
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
+  };
+}
+
 function normalizeRagConversation(raw: any): RagConversation {
   if (!raw || typeof raw !== "object") {
     return raw as RagConversation;
@@ -1523,6 +1591,32 @@ function normalizeBatchQueueResult(raw: any): BatchQueueResult {
   };
 }
 
+function normalizeQueueRecoveryPreview(raw: any): BatchQueueRecoveryPreview {
+  return {
+    requested: toNumber(raw?.requested),
+    action: raw?.action ?? "retry",
+    items: Array.isArray(raw?.items)
+      ? raw.items.map((item: any) => ({
+          id: toNumber(item?.id),
+          eligible: Boolean(item?.eligible),
+          currentStatus: item?.currentStatus ?? item?.current_status ?? "",
+          kind: item?.kind ?? "",
+          relativePath: item?.relativePath ?? item?.relative_path ?? "",
+          effect: item?.effect ?? "",
+          blockingReason: item?.blockingReason ?? item?.blocking_reason,
+          warnings: Array.isArray(item?.warnings) ? item.warnings.map(String) : [],
+          isFallback: item?.isFallback ?? item?.is_fallback,
+          fallbackReason: item?.fallbackReason ?? item?.fallback_reason,
+        }))
+      : [],
+    failed: Array.isArray(raw?.failed)
+      ? raw.failed.map((item: any) => ({ id: Number(item.id), message: String(item.message ?? "") }))
+      : [],
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
+  };
+}
+
 function normalizeBatchRollbackResult(raw: any): BatchRollbackResult {
   return {
     requested: Number(raw?.requested ?? 0),
@@ -1550,6 +1644,34 @@ function normalizeCandidate(raw: any): TodoScheduleCandidate {
     dueAt: raw.payload?.dueAt ?? raw.payload?.date,
     confidence: raw.payload?.confidence ?? 0.5,
     status: raw.status === "rejected" ? "dismissed" : raw.status,
+  };
+}
+
+function normalizeRollbackPreview(raw: any): BatchRollbackPreview {
+  return {
+    requested: toNumber(raw?.requested),
+    items: Array.isArray(raw?.items)
+      ? raw.items.map((item: any) => ({
+          id: toNumber(item?.id),
+          eligible: Boolean(item?.eligible),
+          status: item?.status ?? "",
+          currentFileRelativePath: item?.currentFileRelativePath ?? item?.current_file_relative_path ?? "",
+          restoreRelativePath: item?.restoreRelativePath ?? item?.restore_relative_path ?? "",
+          currentFileExists: Boolean(item?.currentFileExists ?? item?.current_file_exists),
+          restoreTargetExists: Boolean(item?.restoreTargetExists ?? item?.restore_target_exists),
+          wouldMove: Boolean(item?.wouldMove ?? item?.would_move),
+          wouldAppendLedger: Boolean(item?.wouldAppendLedger ?? item?.would_append_ledger),
+          blockingReason: item?.blockingReason ?? item?.blocking_reason,
+          warnings: Array.isArray(item?.warnings) ? item.warnings.map(String) : [],
+          isFallback: item?.isFallback ?? item?.is_fallback,
+          fallbackReason: item?.fallbackReason ?? item?.fallback_reason,
+        }))
+      : [],
+    failed: Array.isArray(raw?.failed)
+      ? raw.failed.map((item: any) => ({ id: Number(item.id), message: String(item.message ?? "") }))
+      : [],
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
   };
 }
 
@@ -1952,6 +2074,19 @@ export const commands = {
         fallbackReason,
       }),
     ).then(normalizeQueueItem),
+  previewQueueRecovery: (vaultPath: string, action: "retry" | "skip", queueIds: number[]) =>
+    invokeWithFallback<any>(
+      "preview_queue_recovery",
+      { vaultPath, action, queueIds },
+      (reason) => ({
+        requested: queueIds.length,
+        action,
+        items: [],
+        failed: queueIds.map((id) => ({ id, message: reason })),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeQueueRecoveryPreview),
   retryQueueItems: (vaultPath: string, queueIds: number[]) =>
     invokeWithFallback<any>(
       "retry_queue_items",
@@ -2110,6 +2245,18 @@ export const commands = {
         fallbackReason: reason,
       }),
     ).then(normalizeBatchRollbackResult),
+  previewRollbackMoves: (vaultPath: string, movementIds: number[]) =>
+    invokeWithFallback<any>(
+      "preview_rollback_moves",
+      { vaultPath, movementIds },
+      (reason) => ({
+        requested: movementIds.length,
+        items: [],
+        failed: movementIds.map((id) => ({ id, message: reason })),
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeRollbackPreview),
   listAuditEvents: (vaultPath: string, limit = 30, eventType?: string) =>
     invokeWithFallback<any[]>(
       "list_audit_events",
@@ -2125,6 +2272,26 @@ export const commands = {
         },
       ],
     ).then((items) => items.map(normalizeAuditEvent)),
+  searchAuditEvents: (vaultPath: string, query: AuditSearchQuery) =>
+    invokeWithFallback<any>(
+      "search_audit_events",
+      { vaultPath, query },
+      (reason) => ({
+        events: [
+          {
+            id: 0,
+            eventType: "fallback",
+            payload: { message: reason },
+            createdAt: nowIso(),
+            isFallback: true,
+            fallbackReason: reason,
+          },
+        ],
+        appliedLimit: query.limit ?? 30,
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeAuditSearchResult),
   listTodoScheduleCandidates: (vaultPath: string) =>
     invokeWithFallback<any[]>(
       "list_todo_schedule_candidates",
