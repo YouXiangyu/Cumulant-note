@@ -1004,7 +1004,7 @@ textarea:focus {
 }
 
 .status-metric-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .status-event-grid {
@@ -2094,6 +2094,71 @@ kbd {
 
 .full-width {
   width: 100%;
+}
+
+.archive-map-card {
+  gap: 14px;
+}
+
+.archive-map-summary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.archive-map-summary div {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.archive-map-summary strong {
+  font-size: 18px;
+}
+
+.archive-map-summary span,
+.archive-map-card > small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.archive-map-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.archive-map-list button {
+  align-items: flex-start;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 54px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.archive-map-list button:hover {
+  border-color: var(--green);
+}
+
+.archive-map-list span,
+.archive-map-list small {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.archive-map-list small {
+  color: var(--muted);
 }
 
 @media (max-width: 1360px) {

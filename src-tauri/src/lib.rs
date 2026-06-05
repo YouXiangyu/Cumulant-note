@@ -15,6 +15,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(commands::WatcherRegistry::default())
+        .manage(commands::ResidentWorkerRegistry::default())
         .invoke_handler(tauri::generate_handler![
             commands::select_vault,
             commands::init_vault,
@@ -25,6 +26,8 @@ pub fn run() {
             commands::list_inbox,
             commands::parse_inbox_ledger,
             commands::import_to_inbox,
+            commands::get_archive_map,
+            commands::rebuild_archive_map,
             commands::get_ai_usage,
             commands::rebuild_rag_index,
             commands::get_rag_index_status,
@@ -35,6 +38,9 @@ pub fn run() {
             commands::get_queue_status,
             commands::get_inbox_listener_status,
             commands::get_worker_status,
+            commands::get_resident_worker_status,
+            commands::start_resident_worker,
+            commands::stop_resident_worker,
             commands::run_inbox_worker,
             commands::pause_inbox_worker,
             commands::resume_inbox_worker,

@@ -66,6 +66,7 @@ import { marked } from "marked";
 import {
   AiOrganizePlan,
   AiOrganizeResult,
+  ArchiveMapSnapshot,
   AppSettings,
   BudgetStatus,
   commands,
@@ -87,6 +88,7 @@ import {
   RagIndexRun,
   RagIndexStatus,
   RagTraceRun,
+  ResidentWorkerStatus,
   selectImportFiles,
   selectVault,
   StickyNote as StickyNoteRecord,
@@ -284,8 +286,10 @@ export default function App() {
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [listenerStatus, setListenerStatus] = useState<InboxListenerStatus | null>(null);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null);
+  const [residentWorkerStatus, setResidentWorkerStatus] = useState<ResidentWorkerStatus | null>(null);
   const [workerRunResult, setWorkerRunResult] = useState<WorkerRunResult | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
+  const [archiveMap, setArchiveMap] = useState<ArchiveMapSnapshot | null>(null);
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conflictAnswers, setConflictAnswers] = useState<Record<string, string>>({});
   const [moveLogs, setMoveLogs] = useState<MoveLog[]>([]);
@@ -379,6 +383,7 @@ export default function App() {
   const page = pageTitle(activeView);
   const queueIsPaused = !workerStatus?.listener.enabled || workerStatus.listener.status === "paused";
   const listenerIsRunning = Boolean(listenerStatus?.enabled && listenerStatus.status === "running");
+  const residentWorkerIsRunning = Boolean(residentWorkerStatus?.running);
   const budgetRatio =
     budgetStatus && budgetStatus.monthlyLimitCents > 0
       ? Math.min(1, budgetStatus.spentCents / budgetStatus.monthlyLimitCents)
@@ -472,13 +477,15 @@ export default function App() {
   }
 
   async function refreshOperations(nextVaultPath = vaultPath) {
-    const [nextSettings, nextQueue, nextListener, nextWorker, nextBudget, nextConflicts, nextMoveLogs, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
+    const [nextSettings, nextQueue, nextListener, nextWorker, nextResidentWorker, nextBudget, nextArchiveMap, nextConflicts, nextMoveLogs, nextTodoCandidates, nextNotes, nextMimoStatus, nextRagStatus] =
       await Promise.all([
         commands.getAppSettings(nextVaultPath),
         commands.getQueueStatus(nextVaultPath),
         nextVaultPath ? commands.getInboxListenerStatus(nextVaultPath) : Promise.resolve(null),
         nextVaultPath ? commands.getWorkerStatus(nextVaultPath) : Promise.resolve(null),
+        nextVaultPath ? commands.getResidentWorkerStatus(nextVaultPath) : Promise.resolve(null),
         commands.getBudgetStatus(nextVaultPath),
+        nextVaultPath ? commands.getArchiveMap(nextVaultPath) : Promise.resolve(null),
         commands.listConflicts(nextVaultPath),
         nextVaultPath ? commands.listMoveLogs(nextVaultPath) : Promise.resolve([]),
         commands.listTodoScheduleCandidates(nextVaultPath),
@@ -493,7 +500,9 @@ export default function App() {
     setQueueStatus(nextQueue);
     setListenerStatus(nextListener);
     setWorkerStatus(nextWorker);
+    setResidentWorkerStatus(nextResidentWorker);
     setBudgetStatus(nextBudget);
+    setArchiveMap(nextArchiveMap);
     setConflicts(nextConflicts);
     setMoveLogs(nextMoveLogs);
     setTodoCandidates(nextTodoCandidates);
@@ -713,6 +722,21 @@ export default function App() {
     await runInboxWorker();
   }
 
+  async function toggleResidentWorker() {
+    if (!vaultPath) return;
+    const nextStatus = await run(
+      () =>
+        residentWorkerIsRunning
+          ? commands.stopResidentWorker(vaultPath)
+          : commands.startResidentWorker(vaultPath),
+      residentWorkerIsRunning ? "停止常驻 worker" : "启动常驻 worker",
+      residentWorkerIsRunning ? "常驻 worker 正在停止" : "常驻 worker 已启动",
+    );
+    if (!nextStatus) return;
+    setResidentWorkerStatus(nextStatus);
+    await refreshOperations(vaultPath);
+  }
+
   async function runInboxWorker() {
     if (!vaultPath) return;
     const result = await run(
@@ -842,6 +866,18 @@ export default function App() {
       fallbackReason: result.plan.error || result.extraction.error,
     });
     setActiveView("inbox");
+    await refreshOperations(vaultPath);
+  }
+
+  async function rebuildArchiveMap() {
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.rebuildArchiveMap(vaultPath),
+      "重建 Archive Map",
+      "Archive Map 已重建",
+    );
+    if (!result) return;
+    setArchiveMap(result);
     await refreshOperations(vaultPath);
   }
 
@@ -1098,6 +1134,7 @@ export default function App() {
       workerRunResult?.items[0]?.message ??
       "暂无事件";
     const recentError =
+      residentWorkerStatus?.lastError ??
       listenerStatus?.lastError ??
       (queueStatus?.items?.failed?.[0] ? queueIssueMessage(queueStatus.items.failed[0]) : undefined);
     const featuredConflict = conflicts[0];
@@ -1130,6 +1167,13 @@ export default function App() {
             <span>Worker</span>
             <strong>{workerStatus?.listener.status ?? "未连接"}</strong>
             <small>running {workerStatus?.running ?? 0} · failed {workerStatus?.failed ?? 0}</small>
+          </div>
+          <div>
+            <span>Resident</span>
+            <strong>{residentWorkerStatus?.running ? "运行中" : residentWorkerStatus?.lastStatus ?? "未启动"}</strong>
+            <small>
+              tick {residentWorkerStatus?.maxItemsPerTick ?? 1} · moved {residentWorkerStatus?.lastMoved ?? 0} · failed {residentWorkerStatus?.lastFailed ?? 0}
+            </small>
           </div>
           <div>
             <span>Movement</span>
@@ -1773,6 +1817,10 @@ export default function App() {
             <RefreshCw size={16} aria-hidden="true" />
             扫描入队
           </button>
+          <button type="button" className="secondary-button" onClick={rebuildArchiveMap} disabled={!vaultPath}>
+            <Archive size={16} aria-hidden="true" />
+            重建归档地图
+          </button>
           <button type="button" className="secondary-button" onClick={planOrganize} disabled={!vaultPath}>
             <Sparkles size={16} aria-hidden="true" />
             生成计划
@@ -1784,6 +1832,10 @@ export default function App() {
           <button type="button" className="secondary-button" onClick={runWorkerControl} disabled={!vaultPath}>
             <Zap size={16} aria-hidden="true" />
             {queueIsPaused ? "恢复并运行 worker" : "运行 worker"}
+          </button>
+          <button type="button" className="secondary-button" onClick={toggleResidentWorker} disabled={!vaultPath}>
+            {residentWorkerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
+            {residentWorkerIsRunning ? "停止常驻 worker" : "启动常驻 worker"}
           </button>
           <button type="button" className="secondary-button" onClick={toggleInboxListener} disabled={!vaultPath}>
             {listenerIsRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
@@ -1953,6 +2005,43 @@ export default function App() {
           </div>
 
           <aside className="inbox-aside">
+            <section className="concept-card archive-map-card">
+              <div className="card-heading">
+                <h3>
+                  <Archive size={18} aria-hidden="true" />
+                  Archive Map
+                </h3>
+                <button type="button" className="text-link-button" onClick={rebuildArchiveMap} disabled={!vaultPath}>
+                  重建
+                </button>
+              </div>
+              <div className="archive-map-summary">
+                <div><strong>{archiveMap?.directoryCount ?? 0}</strong><span>正式目录</span></div>
+                <div><strong>{archiveMap?.fileCount ?? 0}</strong><span>样本文件</span></div>
+                <div><strong>{archiveMap?.historyCount ?? 0}</strong><span>历史命中</span></div>
+              </div>
+              <div className="archive-map-list">
+                {(archiveMap?.directories ?? []).slice(0, 5).map((directory) => (
+                  <button
+                    type="button"
+                    key={directory.relativePath}
+                    onClick={() => setTargetMovePath(`${directory.relativePath}/${selectedInboxPath.split("/").pop() || "新文件.md"}`)}
+                  >
+                    <span>{directory.relativePath}</span>
+                    <small>
+                      {directory.fileCount} files · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
+                    </small>
+                  </button>
+                ))}
+                {archiveMap && archiveMap.directories.length === 0 ? (
+                  <p className="empty-state">还没有正式归档目录</p>
+                ) : null}
+                {!archiveMap ? <p className="empty-state">选择并初始化 Vault 后生成归档地图</p> : null}
+              </div>
+              <small>{archiveMap?.markdownPath ?? ".thebrain/rules/archive-map.md"}</small>
+              {archiveMap?.isFallback ? <small>{archiveMap.fallbackReason}</small> : null}
+            </section>
+
             <section className="concept-card">
               <div className="card-heading">
                 <h3>整理模板</h3>

@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod archive_map;
 pub mod audit;
 pub mod budget;
 pub mod candidates;

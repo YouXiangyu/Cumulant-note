@@ -143,6 +143,39 @@ export interface MimoStatus extends CommandMeta {
   status: "key_found" | "key_warning" | "missing_key" | string;
 }
 
+export interface ArchiveMapDirectory {
+  relativePath: string;
+  depth: number;
+  fileCount: number;
+  childCount: number;
+  sampleFiles: string[];
+  keywordHints: string[];
+  historicalMoves: number;
+}
+
+export interface ArchiveMapRun {
+  id: number;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  directoryCount: number;
+  fileCount: number;
+  historyCount: number;
+  markdownPath: string;
+  error?: string;
+}
+
+export interface ArchiveMapSnapshot extends CommandMeta {
+  run: ArchiveMapRun;
+  generatedAt: string;
+  markdownPath: string;
+  directoryCount: number;
+  fileCount: number;
+  historyCount: number;
+  directories: ArchiveMapDirectory[];
+  markdown: string;
+}
+
 export interface InboxImportResult extends CommandMeta {
   sourcePath: string;
   relativePath?: string;
@@ -235,6 +268,23 @@ export interface WorkerStatus extends CommandMeta {
   running: number;
   failed: number;
   conflicts: number;
+}
+
+export interface ResidentWorkerStatus extends CommandMeta {
+  running: boolean;
+  vaultPath: string;
+  intervalMs: number;
+  maxItemsPerTick: number;
+  stableWaitMs: number;
+  startedAt?: string;
+  lastTickAt?: string;
+  lastStatus: string;
+  lastProcessed: number;
+  lastMoved: number;
+  lastFailed: number;
+  lastConflicts: number;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export interface InboxListenerStatus extends CommandMeta {
@@ -574,6 +624,31 @@ function fallbackMimoStatus(reason: string): MimoStatus {
   };
 }
 
+function fallbackArchiveMap(reason: string): ArchiveMapSnapshot {
+  return {
+    run: {
+      id: 0,
+      status: "fallback",
+      startedAt: nowIso(),
+      finishedAt: nowIso(),
+      directoryCount: 0,
+      fileCount: 0,
+      historyCount: 0,
+      markdownPath: ".thebrain/rules/archive-map.md",
+      error: reason,
+    },
+    generatedAt: nowIso(),
+    markdownPath: ".thebrain/rules/archive-map.md",
+    directoryCount: 0,
+    fileCount: 0,
+    historyCount: 0,
+    directories: [],
+    markdown: "",
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
 function fallbackImportResults(sourcePaths: string[], mode: string, reason: string): InboxImportResult[] {
   return sourcePaths.map((sourcePath) => ({
     sourcePath,
@@ -631,6 +706,25 @@ function fallbackWorkerStatus(reason: string): WorkerStatus {
     running: 0,
     failed: 0,
     conflicts: 0,
+    isFallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function fallbackResidentWorkerStatus(reason: string): ResidentWorkerStatus {
+  return {
+    running: false,
+    vaultPath: "",
+    intervalMs: 5000,
+    maxItemsPerTick: 1,
+    stableWaitMs: 1000,
+    lastStatus: "stopped",
+    lastProcessed: 0,
+    lastMoved: 0,
+    lastFailed: 0,
+    lastConflicts: 0,
+    lastError: reason,
+    updatedAt: nowIso(),
     isFallback: true,
     fallbackReason: reason,
   };
@@ -1014,6 +1108,10 @@ export const commands = {
   listInbox: (vaultPath: string) => invoke<InboxItem[]>("list_inbox", { vaultPath }),
   parseInboxLedger: (vaultPath: string) =>
     invoke<LedgerItem[]>("parse_inbox_ledger", { vaultPath }),
+  getArchiveMap: (vaultPath: string) =>
+    invokeWithFallback<ArchiveMapSnapshot>("get_archive_map", { vaultPath }, fallbackArchiveMap),
+  rebuildArchiveMap: (vaultPath: string) =>
+    invokeWithFallback<ArchiveMapSnapshot>("rebuild_archive_map", { vaultPath }, fallbackArchiveMap),
   importToInbox: (vaultPath: string, sourcePaths: string[], mode: "copy" | "move" = "copy") =>
     invokeWithFallback<InboxImportResult[]>(
       "import_to_inbox",
@@ -1096,6 +1194,24 @@ export const commands = {
     ).then(normalizeQueueStatus),
   getWorkerStatus: (vaultPath: string) =>
     invokeWithFallback<WorkerStatus>("get_worker_status", { vaultPath }, fallbackWorkerStatus),
+  getResidentWorkerStatus: (vaultPath: string) =>
+    invokeWithFallback<ResidentWorkerStatus>(
+      "get_resident_worker_status",
+      { vaultPath },
+      fallbackResidentWorkerStatus,
+    ),
+  startResidentWorker: (vaultPath: string) =>
+    invokeWithFallback<ResidentWorkerStatus>(
+      "start_resident_worker",
+      { vaultPath, options: { intervalMs: 5000, maxItemsPerTick: 1, stableWaitMs: 1000 } },
+      fallbackResidentWorkerStatus,
+    ),
+  stopResidentWorker: (vaultPath: string) =>
+    invokeWithFallback<ResidentWorkerStatus>(
+      "stop_resident_worker",
+      { vaultPath },
+      fallbackResidentWorkerStatus,
+    ),
   runInboxWorker: (vaultPath: string, maxItems = 8) =>
     invokeWithFallback<WorkerRunResult>(
       "run_inbox_worker",

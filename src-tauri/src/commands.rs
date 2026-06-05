@@ -1,6 +1,7 @@
 use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
 };
+use crate::services::archive_map::{ArchiveMapService, ArchiveMapSnapshot};
 use crate::services::audit::AuditService;
 use crate::services::budget::{BudgetService, BudgetSettingsInput, BudgetStatus};
 use crate::services::candidates::{ActionCandidate, CandidateInput, CandidateService};
@@ -24,11 +25,17 @@ use crate::services::vault::{
     canonical_vault_root, VaultInitResult, VaultService, VaultTreeNode, INBOX_DIR,
 };
 use crate::services::worker::{WorkerRunOptions, WorkerRunResult, WorkerService, WorkerStatus};
+use chrono::Utc;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -37,6 +44,58 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 pub struct WatcherRegistry {
     watchers: Mutex<HashMap<String, RecommendedWatcher>>,
 }
+
+#[derive(Default)]
+pub struct ResidentWorkerRegistry {
+    workers: Mutex<HashMap<String, ResidentWorkerHandle>>,
+}
+
+#[derive(Clone)]
+struct ResidentWorkerHandle {
+    stop: Arc<AtomicBool>,
+    status: Arc<Mutex<ResidentWorkerStatus>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentWorkerOptions {
+    pub interval_ms: Option<u64>,
+    pub max_items_per_tick: Option<usize>,
+    pub stable_wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedResidentWorkerOptions {
+    interval_ms: u64,
+    max_items_per_tick: usize,
+    stable_wait_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentWorkerStatus {
+    pub running: bool,
+    pub vault_path: String,
+    pub interval_ms: u64,
+    pub max_items_per_tick: usize,
+    pub stable_wait_ms: u64,
+    pub started_at: Option<String>,
+    pub last_tick_at: Option<String>,
+    pub last_status: String,
+    pub last_processed: usize,
+    pub last_moved: usize,
+    pub last_failed: usize,
+    pub last_conflicts: usize,
+    pub last_error: Option<String>,
+    pub updated_at: String,
+}
+
+const RESIDENT_WORKER_DEFAULT_INTERVAL_MS: u64 = 5_000;
+const RESIDENT_WORKER_MIN_INTERVAL_MS: u64 = 1_000;
+const RESIDENT_WORKER_MAX_INTERVAL_MS: u64 = 60_000;
+const RESIDENT_WORKER_DEFAULT_STABLE_WAIT_MS: u64 = 1_000;
+const RESIDENT_WORKER_MIN_STABLE_WAIT_MS: u64 = 250;
+const RESIDENT_WORKER_MAX_STABLE_WAIT_MS: u64 = 30_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +119,131 @@ pub struct InboxPlanResult {
 
 fn into_command_result<T>(result: crate::services::ServiceResult<T>) -> Result<T, String> {
     result.map_err(|error| error.to_string())
+}
+
+fn resolve_resident_worker_options(
+    options: Option<ResidentWorkerOptions>,
+) -> ResolvedResidentWorkerOptions {
+    let interval_ms = options
+        .as_ref()
+        .and_then(|options| options.interval_ms)
+        .unwrap_or(RESIDENT_WORKER_DEFAULT_INTERVAL_MS)
+        .clamp(
+            RESIDENT_WORKER_MIN_INTERVAL_MS,
+            RESIDENT_WORKER_MAX_INTERVAL_MS,
+        );
+    let stable_wait_ms = options
+        .as_ref()
+        .and_then(|options| options.stable_wait_ms)
+        .unwrap_or(RESIDENT_WORKER_DEFAULT_STABLE_WAIT_MS)
+        .clamp(
+            RESIDENT_WORKER_MIN_STABLE_WAIT_MS,
+            RESIDENT_WORKER_MAX_STABLE_WAIT_MS,
+        );
+
+    ResolvedResidentWorkerOptions {
+        interval_ms,
+        max_items_per_tick: 1,
+        stable_wait_ms,
+    }
+}
+
+fn default_resident_worker_status(
+    vault_path: String,
+    options: ResolvedResidentWorkerOptions,
+) -> ResidentWorkerStatus {
+    ResidentWorkerStatus {
+        running: false,
+        vault_path,
+        interval_ms: options.interval_ms,
+        max_items_per_tick: options.max_items_per_tick,
+        stable_wait_ms: options.stable_wait_ms,
+        started_at: None,
+        last_tick_at: None,
+        last_status: "stopped".to_string(),
+        last_processed: 0,
+        last_moved: 0,
+        last_failed: 0,
+        last_conflicts: 0,
+        last_error: None,
+        updated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn clone_resident_status(handle: &ResidentWorkerHandle) -> Result<ResidentWorkerStatus, String> {
+    let mut status = handle
+        .status
+        .lock()
+        .map_err(|_| "resident worker status poisoned".to_string())?
+        .clone();
+    if handle.stop.load(Ordering::SeqCst) {
+        status.running = false;
+    }
+    Ok(status)
+}
+
+fn update_resident_status<F>(status: &Arc<Mutex<ResidentWorkerStatus>>, update: F)
+where
+    F: FnOnce(&mut ResidentWorkerStatus),
+{
+    if let Ok(mut status) = status.lock() {
+        update(&mut status);
+        status.updated_at = Utc::now().to_rfc3339();
+    }
+}
+
+fn sleep_resident_interval(stop: &AtomicBool, interval_ms: u64) {
+    let mut remaining = interval_ms;
+    while remaining > 0 && !stop.load(Ordering::SeqCst) {
+        let chunk = remaining.min(250);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining -= chunk;
+    }
+}
+
+fn run_resident_worker_loop(
+    vault_path: String,
+    options: ResolvedResidentWorkerOptions,
+    stop: Arc<AtomicBool>,
+    status: Arc<Mutex<ResidentWorkerStatus>>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        let tick_at = Utc::now().to_rfc3339();
+        update_resident_status(&status, |status| {
+            status.last_tick_at = Some(tick_at);
+            status.last_status = "running".to_string();
+            status.last_error = None;
+        });
+
+        match WorkerService::drain(
+            &vault_path,
+            WorkerRunOptions {
+                max_items: Some(options.max_items_per_tick),
+                stable_wait_ms: Some(options.stable_wait_ms),
+                force_mock: Some(false),
+            },
+        ) {
+            Ok(result) => update_resident_status(&status, |status| {
+                status.last_status = result.status;
+                status.last_processed = result.processed;
+                status.last_moved = result.moved;
+                status.last_failed = result.failed;
+                status.last_conflicts = result.conflicts;
+                status.last_error = None;
+            }),
+            Err(error) => update_resident_status(&status, |status| {
+                status.last_status = "error".to_string();
+                status.last_error = Some(error.to_string());
+            }),
+        }
+
+        sleep_resident_interval(&stop, options.interval_ms);
+    }
+
+    update_resident_status(&status, |status| {
+        status.running = false;
+        status.last_status = "stopped".to_string();
+    });
 }
 
 #[tauri::command]
@@ -133,6 +317,16 @@ pub fn import_to_inbox(
 }
 
 #[tauri::command]
+pub fn get_archive_map(vault_path: String) -> Result<ArchiveMapSnapshot, String> {
+    into_command_result(ArchiveMapService::latest_or_rebuild(&vault_path))
+}
+
+#[tauri::command]
+pub fn rebuild_archive_map(vault_path: String) -> Result<ArchiveMapSnapshot, String> {
+    into_command_result(ArchiveMapService::rebuild(&vault_path))
+}
+
+#[tauri::command]
 pub fn get_ai_usage(vault_path: String) -> Result<UsageSummary, String> {
     into_command_result(UsageService::summary(&vault_path))
 }
@@ -194,6 +388,124 @@ pub fn get_inbox_listener_status(vault_path: String) -> Result<ListenerState, St
 #[tauri::command]
 pub fn get_worker_status(vault_path: String) -> Result<WorkerStatus, String> {
     into_command_result(WorkerService::status(&vault_path))
+}
+
+#[tauri::command]
+pub fn get_resident_worker_status(
+    vault_path: String,
+    registry: tauri::State<'_, ResidentWorkerRegistry>,
+) -> Result<ResidentWorkerStatus, String> {
+    let root = canonical_vault_root(&vault_path).map_err(|error| error.to_string())?;
+    let key = root.to_string_lossy().to_string();
+    let options = resolve_resident_worker_options(None);
+    let workers = registry
+        .workers
+        .lock()
+        .map_err(|_| "resident worker registry poisoned".to_string())?;
+    match workers.get(&key) {
+        Some(handle) => clone_resident_status(handle),
+        None => Ok(default_resident_worker_status(key, options)),
+    }
+}
+
+#[tauri::command]
+pub fn start_resident_worker(
+    vault_path: String,
+    options: Option<ResidentWorkerOptions>,
+    registry: tauri::State<'_, ResidentWorkerRegistry>,
+) -> Result<ResidentWorkerStatus, String> {
+    let root = canonical_vault_root(&vault_path).map_err(|error| error.to_string())?;
+    let key = root.to_string_lossy().to_string();
+    let resolved = resolve_resident_worker_options(options);
+
+    {
+        let mut workers = registry
+            .workers
+            .lock()
+            .map_err(|_| "resident worker registry poisoned".to_string())?;
+        if let Some(handle) = workers.get(&key) {
+            let status = clone_resident_status(handle)?;
+            if status.running {
+                return Ok(status);
+            }
+        }
+        workers.remove(&key);
+    }
+
+    into_command_result(WorkerService::resume(&key))?;
+    let _ = AuditService::record(
+        &key,
+        "resident_worker_started",
+        json!({
+            "intervalMs": resolved.interval_ms,
+            "maxItemsPerTick": resolved.max_items_per_tick,
+            "stableWaitMs": resolved.stable_wait_ms
+        }),
+    );
+
+    let now = Utc::now().to_rfc3339();
+    let status = Arc::new(Mutex::new(ResidentWorkerStatus {
+        running: true,
+        vault_path: key.clone(),
+        interval_ms: resolved.interval_ms,
+        max_items_per_tick: resolved.max_items_per_tick,
+        stable_wait_ms: resolved.stable_wait_ms,
+        started_at: Some(now.clone()),
+        last_tick_at: None,
+        last_status: "starting".to_string(),
+        last_processed: 0,
+        last_moved: 0,
+        last_failed: 0,
+        last_conflicts: 0,
+        last_error: None,
+        updated_at: now,
+    }));
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = ResidentWorkerHandle {
+        stop: Arc::clone(&stop),
+        status: Arc::clone(&status),
+    };
+
+    thread::spawn({
+        let vault_path = key.clone();
+        move || run_resident_worker_loop(vault_path, resolved, stop, status)
+    });
+
+    registry
+        .workers
+        .lock()
+        .map_err(|_| "resident worker registry poisoned".to_string())?
+        .insert(key, handle.clone());
+    clone_resident_status(&handle)
+}
+
+#[tauri::command]
+pub fn stop_resident_worker(
+    vault_path: String,
+    registry: tauri::State<'_, ResidentWorkerRegistry>,
+) -> Result<ResidentWorkerStatus, String> {
+    let root = canonical_vault_root(&vault_path).map_err(|error| error.to_string())?;
+    let key = root.to_string_lossy().to_string();
+    let options = resolve_resident_worker_options(None);
+    let handle = registry
+        .workers
+        .lock()
+        .map_err(|_| "resident worker registry poisoned".to_string())?
+        .get(&key)
+        .cloned();
+
+    match handle {
+        Some(handle) => {
+            handle.stop.store(true, Ordering::SeqCst);
+            update_resident_status(&handle.status, |status| {
+                status.running = false;
+                status.last_status = "stopping".to_string();
+            });
+            let _ = AuditService::record(&key, "resident_worker_stopped", json!({}));
+            clone_resident_status(&handle)
+        }
+        None => Ok(default_resident_worker_status(key, options)),
+    }
 }
 
 #[tauri::command]
@@ -742,4 +1054,22 @@ fn queue_status(vault_path: &str) -> crate::services::ServiceResult<QueueStatus>
         conflicts: QueueService::list_by_status(vault_path, "conflict")?,
         completed: QueueService::list_by_status(vault_path, "completed")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_worker_options_stay_conservative() {
+        let options = resolve_resident_worker_options(Some(ResidentWorkerOptions {
+            interval_ms: Some(100),
+            max_items_per_tick: Some(99),
+            stable_wait_ms: Some(10),
+        }));
+
+        assert_eq!(options.interval_ms, RESIDENT_WORKER_MIN_INTERVAL_MS);
+        assert_eq!(options.max_items_per_tick, 1);
+        assert_eq!(options.stable_wait_ms, RESIDENT_WORKER_MIN_STABLE_WAIT_MS);
+    }
 }

@@ -1,3 +1,4 @@
+use crate::services::archive_map::{ArchiveMapService, ArchiveMapSnapshot};
 use crate::services::budget::{BudgetLedgerInput, BudgetService};
 use crate::services::vault::{
     canonical_vault_root, normalize_relative_path, resolve_existing_file, INBOX_DIR,
@@ -253,29 +254,32 @@ impl MimoProvider {
                 "missing MIMO_API_KEY or vault .secrets key",
             ));
         };
-        let prompt = organize_prompt(&source, extracted_text.unwrap_or(""));
+        let archive_map = ArchiveMapService::latest_or_rebuild(vault_path)?;
+        let prompt = organize_prompt(&source, extracted_text.unwrap_or(""), &archive_map.markdown);
         match call_mimo_text(&key, MIMO_ORGANIZE_MODEL, &prompt) {
-            Ok(text) => match parse_organize_response(vault_path, &source, &text) {
-                Ok(mut decision) => {
-                    record_ai_usage(
-                        vault_path,
-                        MIMO_ORGANIZE_MODEL,
-                        "organize",
-                        &decision.status,
-                    );
-                    decision.provider = "mimo".to_string();
-                    decision.model = MIMO_ORGANIZE_MODEL.to_string();
-                    Ok(decision)
+            Ok(text) => {
+                match parse_organize_response(vault_path, &source, &text, Some(&archive_map)) {
+                    Ok(mut decision) => {
+                        record_ai_usage(
+                            vault_path,
+                            MIMO_ORGANIZE_MODEL,
+                            "organize",
+                            &decision.status,
+                        );
+                        decision.provider = "mimo".to_string();
+                        decision.model = MIMO_ORGANIZE_MODEL.to_string();
+                        Ok(decision)
+                    }
+                    Err(error) => {
+                        record_ai_usage(vault_path, MIMO_ORGANIZE_MODEL, "organize", "parse_error");
+                        Ok(fallback_decision(
+                            &source,
+                            "parse_error",
+                            &error.to_string(),
+                        ))
+                    }
                 }
-                Err(error) => {
-                    record_ai_usage(vault_path, MIMO_ORGANIZE_MODEL, "organize", "parse_error");
-                    Ok(fallback_decision(
-                        &source,
-                        "parse_error",
-                        &error.to_string(),
-                    ))
-                }
-            },
+            }
             Err(error) => {
                 let status = classify_mimo_error(&error);
                 record_ai_usage(vault_path, MIMO_ORGANIZE_MODEL, "organize", status);
@@ -490,6 +494,7 @@ fn parse_organize_response(
     vault_path: &str,
     source: &str,
     text: &str,
+    archive_map: Option<&ArchiveMapSnapshot>,
 ) -> ServiceResult<OrganizeDecision> {
     let raw_json = extract_json_object(text).ok_or_else(|| {
         ServiceError::InvalidState("mimo organize response did not contain JSON".to_string())
@@ -509,6 +514,22 @@ fn parse_organize_response(
     if root.join(&target).exists() {
         status = "pending".to_string();
         error = Some("target_conflict".to_string());
+    }
+    if status == "ok" {
+        match target_parent_dir(&target) {
+            Some(parent)
+                if archive_map
+                    .map(|map| ArchiveMapService::contains_directory(map, &parent))
+                    .unwrap_or(false) => {}
+            Some(_) => {
+                status = "pending".to_string();
+                error = Some("target_not_in_archive_map".to_string());
+            }
+            None => {
+                status = "pending".to_string();
+                error = Some("target_missing_archive_directory".to_string());
+            }
+        }
     }
 
     let confidence = number_field(&value, &["confidence"])
@@ -576,6 +597,14 @@ fn value_array_field(value: &Value, keys: &[&str]) -> Vec<Value> {
         .find_map(|key| value.get(*key).and_then(Value::as_array))
         .cloned()
         .unwrap_or_default()
+}
+
+fn target_parent_dir(target: &str) -> Option<String> {
+    Path::new(target)
+        .parent()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .filter(|path| !path.is_empty() && path != ".")
+        .and_then(|path| normalize_relative_path(&path).ok())
 }
 
 fn fallback_extract(relative_path: &str, status: &str, reason: &str) -> MimoExtractResult {
@@ -658,9 +687,10 @@ fn extract_prompt() -> &'static str {
     "Extract the readable content from this file as concise Markdown. Do not include chain-of-thought."
 }
 
-fn organize_prompt(source: &str, text: &str) -> String {
+fn organize_prompt(source: &str, text: &str, archive_map_markdown: &str) -> String {
     format!(
         r#"You organize a local Markdown knowledge vault.
+You must use the Archive Map below as the source of truth for formal archive directories.
 Return only valid JSON with this exact shape:
 {{
   "sourceRelativePath": "{source}",
@@ -674,8 +704,14 @@ Return only valid JSON with this exact shape:
 }}
 Rules:
 - targetRelativePath must be relative to the vault, must not use .., and should not remain inside {INBOX_DIR}.
+- Prefer a target directory that already appears in the Archive Map.
+- If no existing Archive Map directory fits, suggest a new directory only with a clear reason and confidence below 0.6.
+- Low confidence, a new directory, a target conflict, or a classification boundary issue will require user confirmation.
 - Use confidence below 0.6 when unsure.
 - Do not include Markdown fences or explanatory prose.
+
+Archive Map:
+{archive_map_markdown}
 
 Extracted content:
 {text}"#
@@ -807,6 +843,10 @@ mod tests {
     fn organize_parser_accepts_controlled_json() {
         let temp = tempfile::tempdir().unwrap();
         VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        let archive_map =
+            crate::services::archive_map::ArchiveMapService::rebuild(temp.path().to_str().unwrap())
+                .unwrap();
         let source = format!("{INBOX_DIR}/note.md");
         let decision = parse_organize_response(
             temp.path().to_str().unwrap(),
@@ -823,6 +863,7 @@ mod tests {
               "scheduleCandidates": []
             }
             ```"#,
+            Some(&archive_map),
         )
         .unwrap();
 
@@ -836,14 +877,40 @@ mod tests {
     fn organize_parser_rejects_escaping_target() {
         let temp = tempfile::tempdir().unwrap();
         VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let archive_map =
+            crate::services::archive_map::ArchiveMapService::rebuild(temp.path().to_str().unwrap())
+                .unwrap();
         let source = format!("{INBOX_DIR}/note.md");
         let error = parse_organize_response(
             temp.path().to_str().unwrap(),
             &source,
             r#"{"targetRelativePath":"../outside.md","confidence":0.9}"#,
+            Some(&archive_map),
         )
         .unwrap_err();
 
         assert!(matches!(error, ServiceError::InvalidRelativePath(_)));
+    }
+
+    #[test]
+    fn organize_parser_marks_new_directories_pending_without_archive_map_match() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        let archive_map =
+            crate::services::archive_map::ArchiveMapService::rebuild(temp.path().to_str().unwrap())
+                .unwrap();
+        let source = format!("{INBOX_DIR}/note.md");
+
+        let decision = parse_organize_response(
+            temp.path().to_str().unwrap(),
+            &source,
+            r#"{"targetRelativePath":"999-New/note.md","confidence":0.9,"reason":"new category"}"#,
+            Some(&archive_map),
+        )
+        .unwrap();
+
+        assert_eq!(decision.status, "pending");
+        assert_eq!(decision.error.as_deref(), Some("target_not_in_archive_map"));
     }
 }

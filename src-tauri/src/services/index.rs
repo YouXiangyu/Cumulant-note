@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-            VALUES ('schema_version', '5', ?1)
+            VALUES ('schema_version', '6', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 5;
+            PRAGMA user_version = 6;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -185,6 +185,36 @@ impl IndexService {
             );
             CREATE INDEX IF NOT EXISTS idx_conflict_rule_hits_rule_status
                 ON conflict_rule_hits(rule_id, status, created_at);
+
+            CREATE TABLE IF NOT EXISTS archive_map_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                directory_count INTEGER NOT NULL DEFAULT 0,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                history_count INTEGER NOT NULL DEFAULT 0,
+                markdown_path TEXT NOT NULL,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_archive_map_runs_status_started
+                ON archive_map_runs(status, started_at);
+
+            CREATE TABLE IF NOT EXISTS archive_map_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                relative_path TEXT NOT NULL,
+                depth INTEGER NOT NULL DEFAULT 0,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                child_count INTEGER NOT NULL DEFAULT 0,
+                sample_files_json TEXT NOT NULL DEFAULT '[]',
+                keyword_hints_json TEXT NOT NULL DEFAULT '[]',
+                historical_moves INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES archive_map_runs(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_archive_map_entries_run_path
+                ON archive_map_entries(run_id, relative_path);
 
             CREATE TABLE IF NOT EXISTS action_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -403,6 +433,8 @@ mod tests {
                     'movement_log',
                     'conflict_rules',
                     'conflict_rule_hits',
+                    'archive_map_runs',
+                    'archive_map_entries',
                     'action_candidates',
                     'sticky_notes',
                     'rag_documents',
@@ -418,6 +450,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 22);
+        assert_eq!(table_count, 24);
     }
 }
