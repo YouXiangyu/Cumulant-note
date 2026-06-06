@@ -55,6 +55,99 @@ pub struct CandidatePromotionResult {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemSearchQuery {
+    pub query: Option<String>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemSearchResult {
+    pub items: Vec<ActionItemRecord>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemRecord {
+    pub id: i64,
+    pub kind: String,
+    pub source_candidate_id: Option<i64>,
+    pub source_relative_path: Option<String>,
+    pub title: String,
+    pub notes: Option<String>,
+    pub due_at: Option<String>,
+    pub starts_at: Option<String>,
+    pub ends_at: Option<String>,
+    pub all_day: Option<bool>,
+    pub timezone: Option<String>,
+    pub location: Option<String>,
+    pub payload: Value,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub cancelled_at: Option<String>,
+}
+
+impl From<TodoItem> for ActionItemRecord {
+    fn from(item: TodoItem) -> Self {
+        Self {
+            id: item.id,
+            kind: "todo".to_string(),
+            source_candidate_id: item.source_candidate_id,
+            source_relative_path: item.source_relative_path,
+            title: item.title,
+            notes: item.notes,
+            due_at: item.due_at,
+            starts_at: None,
+            ends_at: None,
+            all_day: None,
+            timezone: None,
+            location: None,
+            payload: item.payload,
+            status: item.status,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            completed_at: item.completed_at,
+            cancelled_at: item.cancelled_at,
+        }
+    }
+}
+
+impl From<ScheduleItem> for ActionItemRecord {
+    fn from(item: ScheduleItem) -> Self {
+        Self {
+            id: item.id,
+            kind: "schedule".to_string(),
+            source_candidate_id: item.source_candidate_id,
+            source_relative_path: item.source_relative_path,
+            title: item.title,
+            notes: item.notes,
+            due_at: None,
+            starts_at: item.starts_at,
+            ends_at: item.ends_at,
+            all_day: Some(item.all_day),
+            timezone: item.timezone,
+            location: item.location,
+            payload: item.payload,
+            status: item.status,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            completed_at: item.completed_at,
+            cancelled_at: item.cancelled_at,
+        }
+    }
+}
+
 pub struct ActionItemService;
 
 impl ActionItemService {
@@ -191,6 +284,61 @@ impl ActionItemService {
         let mut statement = connection.prepare(sql)?;
         let rows = statement.query_map([], row_to_schedule_item)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn search_items(
+        vault_path: &str,
+        query: ActionItemSearchQuery,
+    ) -> ServiceResult<ActionItemSearchResult> {
+        let kind_filter = normalize_kind_filter(query.kind.as_deref())?;
+        let status_filter = normalize_status_filter(query.status.as_deref())?;
+        let text_filter = query
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_lowercase());
+        let limit = query.limit.unwrap_or(20).clamp(1, 100);
+        let offset = query.offset.unwrap_or(0);
+
+        let mut records = Vec::new();
+        if kind_filter != "schedule" {
+            records.extend(
+                Self::list_todo_items(vault_path, true)?
+                    .into_iter()
+                    .map(ActionItemRecord::from),
+            );
+        }
+        if kind_filter != "todo" {
+            records.extend(
+                Self::list_schedule_items(vault_path, true)?
+                    .into_iter()
+                    .map(ActionItemRecord::from),
+            );
+        }
+
+        records.retain(|item| {
+            action_item_matches_status(item, &status_filter)
+                && action_item_matches_query(item, text_filter.as_deref())
+        });
+        records.sort_by(action_item_sort);
+
+        let total = records.len();
+        let items = records
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let consumed = offset.saturating_add(items.len());
+        let next_offset = (consumed < total).then_some(consumed);
+
+        Ok(ActionItemSearchResult {
+            items,
+            total,
+            limit,
+            offset,
+            next_offset,
+        })
     }
 
     pub fn set_todo_status(vault_path: &str, id: i64, status: &str) -> ServiceResult<TodoItem> {
@@ -507,6 +655,93 @@ fn payload_bool(payload: &Value, keys: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_kind_filter(kind: Option<&str>) -> ServiceResult<String> {
+    let value = kind.unwrap_or("all").trim();
+    if value.is_empty() || value == "all" {
+        return Ok("all".to_string());
+    }
+    match value {
+        "todo" | "schedule" => Ok(value.to_string()),
+        _ => Err(ServiceError::InvalidState(format!(
+            "unsupported action item kind filter: {value}"
+        ))),
+    }
+}
+
+fn normalize_status_filter(status: Option<&str>) -> ServiceResult<String> {
+    let value = status.unwrap_or("active").trim();
+    if value.is_empty() {
+        return Ok("active".to_string());
+    }
+    match value {
+        "active" | "all" | "open" | "scheduled" | "completed" | "cancelled" | "archived" => {
+            Ok(value.to_string())
+        }
+        _ => Err(ServiceError::InvalidState(format!(
+            "unsupported action item status filter: {value}"
+        ))),
+    }
+}
+
+fn action_item_matches_status(item: &ActionItemRecord, status_filter: &str) -> bool {
+    match status_filter {
+        "all" => true,
+        "active" => item.status == "open" || item.status == "scheduled",
+        status => item.status == status,
+    }
+}
+
+fn action_item_matches_query(item: &ActionItemRecord, query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    let payload_text = serde_json::to_string(&item.payload).unwrap_or_default();
+    let matches = [
+        Some(item.kind.as_str()),
+        Some(item.title.as_str()),
+        item.notes.as_deref(),
+        item.source_relative_path.as_deref(),
+        item.due_at.as_deref(),
+        item.starts_at.as_deref(),
+        item.ends_at.as_deref(),
+        item.timezone.as_deref(),
+        item.location.as_deref(),
+        Some(item.status.as_str()),
+        Some(payload_text.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(query));
+    matches
+}
+
+fn action_item_sort(left: &ActionItemRecord, right: &ActionItemRecord) -> std::cmp::Ordering {
+    action_status_rank(&left.status)
+        .cmp(&action_status_rank(&right.status))
+        .then_with(|| action_item_time_key(left).cmp(&action_item_time_key(right)))
+        .then_with(|| left.title.cmp(&right.title))
+        .then_with(|| left.kind.cmp(&right.kind))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn action_status_rank(status: &str) -> u8 {
+    match status {
+        "open" | "scheduled" => 0,
+        "completed" => 1,
+        "cancelled" => 2,
+        "archived" => 3,
+        _ => 4,
+    }
+}
+
+fn action_item_time_key(item: &ActionItemRecord) -> &str {
+    item.starts_at
+        .as_deref()
+        .or(item.due_at.as_deref())
+        .or(Some(item.created_at.as_str()))
+        .unwrap_or("")
+}
+
 fn validate_todo_status(status: &str) -> ServiceResult<()> {
     match status {
         "open" | "completed" | "cancelled" | "archived" => Ok(()),
@@ -651,5 +886,113 @@ mod tests {
         )
         .unwrap();
         assert!(ActionItemService::promote_candidate(vault_path, unsupported.id).is_err());
+    }
+
+    #[test]
+    fn search_items_filters_status_kind_text_and_pages_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+
+        let todo_candidate = CandidateService::create(
+            vault_path,
+            CandidateInput {
+                candidate_type: "todo".to_string(),
+                source_relative_path: Some("100-School/homework.md".to_string()),
+                title: "提交线代作业".to_string(),
+                payload: Some(json!({
+                    "notes": "周三前交给助教",
+                    "dueAt": "2026-06-10"
+                })),
+            },
+        )
+        .unwrap();
+        let schedule_candidate = CandidateService::create(
+            vault_path,
+            CandidateInput {
+                candidate_type: "schedule".to_string(),
+                source_relative_path: Some("200-Projects/brain/meeting.md".to_string()),
+                title: "项目例会".to_string(),
+                payload: Some(json!({
+                    "startsAt": "2026-06-11T09:00:00+08:00",
+                    "location": "线上会议室",
+                    "notes": "讨论 Archive Map"
+                })),
+            },
+        )
+        .unwrap();
+        let second_todo_candidate = CandidateService::create(
+            vault_path,
+            CandidateInput {
+                candidate_type: "todo".to_string(),
+                source_relative_path: Some("000-收集箱/life.md".to_string()),
+                title: "购买牛奶".to_string(),
+                payload: Some(json!({"notes": "晚饭后"})),
+            },
+        )
+        .unwrap();
+
+        let promoted_todo =
+            ActionItemService::promote_candidate(vault_path, todo_candidate.id).unwrap();
+        ActionItemService::promote_candidate(vault_path, schedule_candidate.id).unwrap();
+        ActionItemService::promote_candidate(vault_path, second_todo_candidate.id).unwrap();
+
+        let schedule_results = ActionItemService::search_items(
+            vault_path,
+            ActionItemSearchQuery {
+                query: Some("archive".to_string()),
+                kind: Some("schedule".to_string()),
+                status: Some("active".to_string()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(schedule_results.total, 1);
+        assert_eq!(schedule_results.items[0].kind, "schedule");
+        assert_eq!(schedule_results.items[0].title, "项目例会");
+
+        let paged = ActionItemService::search_items(
+            vault_path,
+            ActionItemSearchQuery {
+                query: None,
+                kind: Some("all".to_string()),
+                status: Some("all".to_string()),
+                limit: Some(1),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.total, 3);
+        assert_eq!(paged.items.len(), 1);
+        assert_eq!(paged.next_offset, Some(1));
+
+        let todo_id = promoted_todo.todo_item.unwrap().id;
+        ActionItemService::set_todo_status(vault_path, todo_id, "completed").unwrap();
+        let completed = ActionItemService::search_items(
+            vault_path,
+            ActionItemSearchQuery {
+                query: Some("线代".to_string()),
+                kind: Some("todo".to_string()),
+                status: Some("completed".to_string()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(completed.total, 1);
+        assert_eq!(completed.items[0].status, "completed");
+
+        assert!(ActionItemService::search_items(
+            vault_path,
+            ActionItemSearchQuery {
+                query: None,
+                kind: Some("person".to_string()),
+                status: Some("all".to_string()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .is_err());
     }
 }

@@ -84,6 +84,7 @@ pub fn run() {
             commands::promote_todo_schedule_candidate,
             commands::list_todo_items,
             commands::list_schedule_items,
+            commands::search_todo_schedule_items,
             commands::set_todo_item_status,
             commands::set_schedule_item_status,
             commands::list_sticky_notes,

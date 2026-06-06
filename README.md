@@ -22,7 +22,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - MiMo provider 路径、设置页 key 保存、BOM 污染检测、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、引用筛选、Trace、会话历史、会话重命名/删除/搜索和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
 - 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页已接入 Workspace Insights 第一版真实统计和正式 TODO/日程第一增量，学习曲线、项目级 Agent 历史、提醒通知和联系人档案仍是占位或后续目标。
-- TODO/日程正式行动系统第一增量：`action_candidates` 可 promotion 为 SQLite 内部的 `todo_items` / `schedule_items`，支持幂等创建、列表展示、标题/来源/备注搜索、类型/状态过滤、来源 Markdown 打开、完成和取消状态更新；当前不提供提醒通知、重复日程、Markdown 双写、人名档案或联系人关系。
+- TODO/日程正式行动系统第一增量：`action_candidates` 可 promotion 为 SQLite 内部的 `todo_items` / `schedule_items`，支持幂等创建、列表展示、后端标题/来源/备注等结构化搜索与分页、类型/状态过滤、来源 Markdown 打开、完成和取消状态更新；当前不提供提醒通知、重复日程、Markdown 双写、人名档案或联系人关系。
 
 当前阶段不是完整个人 Agent、真实向量数据库系统或完整多格式解析系统。当前 RAG 使用关键词通道和 local semantic placeholder 通道，不声明已经具备真实 embedding 或重排能力。PDF、DOCX、PPTX、URL 的真实解析仍是后续目标。
 
@@ -117,12 +117,12 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 前端层：
 
 - `src/App.tsx`：桌面工作台 shell，包含 Vault、收集箱、Markdown、AI 整理、RAG 问答、TODO/日程、便利贴、个人页、项目页和设置页。
-- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段和目录规则保存、MiMo 状态、抽取、整理计划与确认原因元数据、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程、冲突详情/预览/只读 diff、冲突规则管理和 RAG 会话/重命名/删除/搜索/问答命令。
+- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段和目录规则保存、MiMo 状态、抽取、整理计划与确认原因元数据、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程列表/搜索、冲突详情/预览/只读 diff、冲突规则管理和 RAG 会话/重命名/删除/搜索/问答命令。
 - `src/styles.css`：视觉 token、左侧导航、页面网格、收集箱、RAG 面板、Markdown 三栏编辑器和便利贴布局。
 
 本地后端服务层：
 
-- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、Archive Map/目录规则、MiMo、listener、队列、worker、resident worker、预算、移动/回滚、audit timeline/search、批量恢复预览、候选、正式 TODO/日程、便利贴、快捷键、冲突预览/规则管理和 RAG commands。
+- `src-tauri/src/commands.rs`：暴露 Vault、Markdown、收集箱、ledger、导入、Archive Map/目录规则、MiMo、listener、队列、worker、resident worker、预算、移动/回滚、audit timeline/search、批量恢复预览、候选、正式 TODO/日程列表/搜索、便利贴、快捷键、冲突预览/规则管理和 RAG commands。
 - `src-tauri/src/services/vault.rs`：Vault 初始化和路径规范化。
 - `src-tauri/src/services/importer.rs`：受控复制/移动外部文件到收集箱。
 - `src-tauri/src/services/listener.rs`：收集箱递归扫描与监听入队规则、稳定等待、临时/隐藏/内部/不支持文件跳过、mtime/size 去重和 listener 状态更新。
@@ -131,7 +131,7 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - `src-tauri/src/services/worker.rs`：收集箱队列的第一层可信消费器，负责 claim pending item、稳定等待、预算检查、调用 MiMo、可信移动、失败/冲突/audit 记录和 drain；手动 worker 与 resident worker 都复用这一服务。
 - `src-tauri/src/services/movement.rs`：收集箱文件移动、移动后空目录清理、ledger、movement log、audit events 和回滚。
 - `src-tauri/src/services/conflict_rules.rs`：冲突问题详情、源/目标文件 bounded preview、bounded 只读 diff 预览、只读重命名建议、用户答案规则写入、规则索引、启用/禁用/编辑、相似规则推荐和确认后应用。
-- `src-tauri/src/services/action_items.rs`：正式 TODO/日程第一增量，负责把候选幂等 promotion 为 `todo_items` / `schedule_items`，并维护完成/取消状态。
+- `src-tauri/src/services/action_items.rs`：正式 TODO/日程第一增量，负责把候选幂等 promotion 为 `todo_items` / `schedule_items`，维护完成/取消状态，并提供后端搜索/分页第一增量。
 - `src-tauri/src/services/workspace_insights.rs`：个人页和项目工作台的只读统计聚合，扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、正式行动项、movement、audit 和 sticky 计数。
 - `src-tauri/src/services/rag.rs`、`retrieval.rs`、`chunking.rs`、`rag_trace.rs`：本地 RAG 索引、范围检索、会话消息、会话重命名/删除/搜索、分块、引用和 Trace。
 - `src-tauri/src/services/index.rs`：`.thebrain/index.sqlite` schema。
@@ -168,7 +168,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - movement log 列表命令 `list_move_logs`、单项回滚命令 `rollback_move`、批量回滚命令 `rollback_moves` 和只读预览命令 `preview_rollback_moves`，不覆盖已有文件；前端批量回滚会先展示当前文件/恢复目标/阻塞原因，再由用户确认执行。
 - audit timeline 命令 `list_audit_events` 和 `search_audit_events`，支持读取最近 audit events，按类型、文本、路径、状态、时间范围和 cursor 搜索；收集箱页面已接入类型/文本/日期范围筛选、分页加载和 bounded payload 详情展开。
 - TODO/日程候选创建、确认、忽略。
-- TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项；前端已提供正式行动项搜索、类型/状态过滤、Markdown 来源打开和项目页边界感知路径匹配。
+- TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`search_todo_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项；前端已接入后端搜索/分页、类型/状态过滤、Markdown 来源打开和项目页边界感知路径匹配。
 - 预算暂停/耗尽状态和 `ai_usage` 用量占位记录。
 - 冲突事件列表、详情、bounded preview、bounded 只读 diff 预览、只读重命名建议、解决记录、用户答案写入规则、相似规则推荐和确认应用命令。
 - 冲突规则 Markdown 文件 `.thebrain/rules/inbox-organizing-rules.md` 与 SQLite 规则索引/命中记录；SQLite 规则支持启用/禁用和字段编辑，Markdown 规则文件保持 append-only。
@@ -191,7 +191,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - RAG 会话增强：当前已有会话重命名、删除、按标题/消息搜索历史和当前回答引用筛选第一增量；后续仍需引用排序/固定、删除恢复/归档策略和更完整的跨会话长期记忆策略。
 - PDF、DOCX、PPTX、URL 的真实解析。
 - 人名档案、联系人信息、会议纪要、通话记录和个人关系管理数据模型。
-- TODO/日程完整工作流增强：当前已有 SQLite 内部正式项、前端搜索/过滤和 Markdown 来源定位第一增量；后续仍需提醒通知、重复日程、优先级、Markdown/YAML 双写或重建策略、批量确认、后端分页/全文搜索、非 Markdown 来源定位和更完整编辑体验。
+- TODO/日程完整工作流增强：当前已有 SQLite 内部正式项、后端搜索/分页、前端过滤和 Markdown 来源定位第一增量；后续仍需提醒通知、重复日程、优先级、Markdown/YAML 双写或重建策略、批量确认、SQLite FTS/更强全文搜索、非 Markdown 来源定位和更完整编辑体验。
 - 便利贴独立多窗口池、窗口回收和更完整的托盘体验。
 - 个人页和项目工作台增强：当前已有 Workspace Insights 第一版真实统计和正式行动项第一增量；后续仍需项目级 Agent 历史、学习曲线、联系人档案、项目级任务编辑增强和更复杂统计接入真实数据。
 - `src/App.tsx` 页面与状态继续拆分，把个人页、项目页、RAG、收集箱、便利贴等不相关模块拆成更清晰的组件和服务边界。
@@ -214,4 +214,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview 和 bounded 只读 diff、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 会话重命名/删除/搜索、RAG 范围检索和 Workspace Insights 聚合；前端构建覆盖 RAG 引用筛选类型检查。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview 和 bounded 只读 diff、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion、状态更新和后端搜索/分页、便利贴、RAG 基础能力、RAG 会话持久化、RAG 会话重命名/删除/搜索、RAG 范围检索和 Workspace Insights 聚合；前端构建覆盖 RAG 引用筛选和行动项后端搜索接入的类型检查。

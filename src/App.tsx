@@ -107,6 +107,7 @@ import {
   StickyNote as StickyNoteRecord,
   TodoScheduleCandidate,
   TodoScheduleItem,
+  TodoScheduleSearchResult,
   UsageSummary,
   VaultInitResult,
   VaultTreeNode,
@@ -253,29 +254,6 @@ function actionStatusLabel(status: string): string {
   if (status === "cancelled") return "已取消";
   if (status === "archived") return "已归档";
   return status || "未知";
-}
-
-function actionItemMatchesStatus(item: TodoScheduleItem, filter: ActionStatusFilter): boolean {
-  if (filter === "all") return true;
-  if (filter === "active") return isActiveActionItem(item);
-  return item.status === filter;
-}
-
-function actionItemMatchesQuery(item: TodoScheduleItem, query: string): boolean {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return true;
-  return [
-    item.title,
-    item.notes,
-    item.sourceRelativePath,
-    item.kind,
-    item.status,
-    actionKindLabel(item),
-    actionStatusLabel(item.status),
-    actionDateLabel(item),
-  ]
-    .filter(Boolean)
-    .some((value) => String(value).toLocaleLowerCase().includes(normalizedQuery));
 }
 
 function relativePathBelongsToPrefix(relativePath?: string, prefix?: string): boolean {
@@ -569,6 +547,11 @@ export default function App() {
   const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [todoScheduleItems, setTodoScheduleItems] = useState<TodoScheduleItem[]>([]);
+  const [actionSearchItems, setActionSearchItems] = useState<TodoScheduleItem[]>([]);
+  const [actionSearchTotal, setActionSearchTotal] = useState(0);
+  const [actionSearchNextOffset, setActionSearchNextOffset] = useState<number | undefined>(undefined);
+  const [actionSearchLoading, setActionSearchLoading] = useState(false);
+  const [actionSearchNotice, setActionSearchNotice] = useState("");
   const [actionSearchText, setActionSearchText] = useState("");
   const [actionKindFilter, setActionKindFilter] = useState<ActionKindFilter>("all");
   const [actionStatusFilter, setActionStatusFilter] = useState<ActionStatusFilter>("active");
@@ -729,19 +712,11 @@ export default function App() {
     [realActionItems],
   );
   const visibleActionItems = useMemo(
-    () => {
-      const query = actionSearchText.trim();
-      return realActionItems.filter((item) => {
-        const kindMatches = actionKindFilter === "all" || item.kind === actionKindFilter;
-        return kindMatches
-          && actionItemMatchesStatus(item, actionStatusFilter)
-          && actionItemMatchesQuery(item, query);
-      });
-    },
-    [actionKindFilter, actionSearchText, actionStatusFilter, realActionItems],
+    () => actionSearchItems,
+    [actionSearchItems],
   );
   const dashboardActionItems = useMemo(
-    () => visibleActionItems.slice(0, 6),
+    () => visibleActionItems,
     [visibleActionItems],
   );
 
@@ -922,6 +897,20 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!vaultPath) {
+      setActionSearchItems([]);
+      setActionSearchTotal(0);
+      setActionSearchNextOffset(undefined);
+      setActionSearchNotice("");
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      void refreshActionSearch(false, vaultPath);
+    }, 180);
+    return () => window.clearTimeout(timeoutId);
+  }, [actionKindFilter, actionSearchText, actionStatusFilter, vaultPath]);
+
   async function run<T>(
     action: () => Promise<T>,
     message: string,
@@ -994,6 +983,64 @@ export default function App() {
     if (activeConversationId && !nextRagConversations.some((conversation) => conversation.id === activeConversationId)) {
       setActiveConversationId(null);
       setRagMessages([]);
+    }
+  }
+
+  function buildActionSearchQuery(offset = 0) {
+    return {
+      query: actionSearchText.trim() || undefined,
+      kind: actionKindFilter,
+      status: actionStatusFilter,
+      limit: 6,
+      offset,
+    };
+  }
+
+  function applyActionSearchResult(result: TodoScheduleSearchResult, append: boolean) {
+    setActionSearchTotal(result.total);
+    setActionSearchNextOffset(result.nextOffset);
+    setActionSearchNotice(
+      result.isFallback
+        ? `行动项后端搜索不可用：${result.fallbackReason ?? "未知原因"}`
+        : result.total > result.items.length
+          ? `后端搜索结果 ${append ? "已追加" : "已加载"} ${append ? "" : "前 "}${result.items.length} / ${result.total}`
+          : "",
+    );
+    setActionSearchItems((current) => {
+      if (!append) return result.items;
+      const seen = new Set(current.map((item) => `${item.kind}:${item.id}`));
+      return [
+        ...current,
+        ...result.items.filter((item) => {
+          const key = `${item.kind}:${item.id}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }),
+      ];
+    });
+  }
+
+  async function refreshActionSearch(append = false, nextVaultPath = vaultPath) {
+    if (!nextVaultPath) {
+      setActionSearchItems([]);
+      setActionSearchTotal(0);
+      setActionSearchNextOffset(undefined);
+      setActionSearchNotice("");
+      return;
+    }
+    setActionSearchLoading(true);
+    try {
+      const offset = append ? actionSearchNextOffset ?? actionSearchItems.length : 0;
+      const result = await commands.searchTodoScheduleItems(
+        nextVaultPath,
+        buildActionSearchQuery(offset),
+      );
+      applyActionSearchResult(result, append);
+    } catch (error) {
+      setActionSearchNotice(`行动项后端搜索失败：${errorMessage(error)}`);
+    } finally {
+      setActionSearchLoading(false);
     }
   }
 
@@ -1645,6 +1692,7 @@ export default function App() {
       });
     }
     await refreshOperations(vaultPath);
+    await refreshActionSearch(false, vaultPath);
   }
 
   async function dismissCandidate(candidate: TodoScheduleCandidate) {
@@ -1676,6 +1724,7 @@ export default function App() {
       ),
     );
     await refreshOperations(vaultPath);
+    await refreshActionSearch(false, vaultPath);
   }
 
   async function completeActionItem(item: TodoScheduleItem) {
@@ -3214,7 +3263,7 @@ export default function App() {
                 <Calendar size={18} aria-hidden="true" />
                 TODO / 日程
               </h3>
-              <span>{visibleActionItems.length}/{realActionItems.length}</span>
+              <span>{actionSearchTotal}/{realActionItems.length}</span>
             </div>
             <div className="action-filter-row">
               <label className="action-search-field">
@@ -3314,6 +3363,18 @@ export default function App() {
                 <p className="empty-state">没有匹配的正式 TODO/日程；可调整筛选，或在收集箱确认候选后创建。</p>
               ) : null}
             </div>
+            {actionSearchNotice ? <p className="field-hint">{actionSearchNotice}</p> : null}
+            {actionSearchNextOffset !== undefined ? (
+              <button
+                type="button"
+                className="full-width ghost-button"
+                disabled={actionSearchLoading}
+                onClick={() => void refreshActionSearch(true)}
+              >
+                <MoreHorizontal size={15} aria-hidden="true" />
+                {actionSearchLoading ? "加载中" : "加载更多行动项"}
+              </button>
+            ) : null}
             <button type="button" className="text-link-button" onClick={() => setActiveView("inbox")}>
               添加任务 <ArrowRight size={14} aria-hidden="true" />
             </button>

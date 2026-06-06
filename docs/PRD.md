@@ -129,7 +129,7 @@ TheBrain 可以从会议纪要、通话记录、笔记和收集箱内容中提�
 
 这些数据的最终写入方式需要后续设计，但默认遵守 Markdown/YAML-first：人物、项目、会议和长期档案等用户可读事实优先写入 Markdown；搜索、排序、提醒、去重、访问频率和内部审计等运行状态可进入 SQLite；必要时采用 Markdown + SQLite 双写，但必须定义主从关系。
 
-当前 TODO/日程已有第一增量：候选可以 promotion 为 `.thebrain/index.sqlite` 内部的正式 TODO/日程项，并支持列表、搜索过滤、Markdown 来源打开、完成和取消。它不是最终的提醒系统、重复日程系统、人名档案系统，也尚未定义 Markdown/YAML 双写策略。
+当前 TODO/日程已有第一增量：候选可以 promotion 为 `.thebrain/index.sqlite` 内部的正式 TODO/日程项，并支持列表、后端搜索/分页、前端过滤、Markdown 来源打开、完成和取消。它不是最终的提醒系统、重复日程系统、人名档案系统，也尚未定义 Markdown/YAML 双写策略。
 
 ### 4.6 个人页与项目工作台
 

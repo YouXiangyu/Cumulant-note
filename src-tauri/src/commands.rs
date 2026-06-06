@@ -1,5 +1,6 @@
 use crate::services::action_items::{
-    ActionItemService, CandidatePromotionResult, ScheduleItem, TodoItem,
+    ActionItemSearchQuery, ActionItemSearchResult, ActionItemService, CandidatePromotionResult,
+    ScheduleItem, TodoItem,
 };
 use crate::services::ai::{
     MimoExtractInput, MimoExtractResult, MimoKeyInput, MimoProvider, MimoStatus, OrganizeDecision,
@@ -1274,6 +1275,14 @@ pub fn list_schedule_items(
         &vault_path,
         include_completed.unwrap_or(false),
     ))
+}
+
+#[tauri::command]
+pub fn search_todo_schedule_items(
+    vault_path: String,
+    query: ActionItemSearchQuery,
+) -> Result<ActionItemSearchResult, String> {
+    into_command_result(ActionItemService::search_items(&vault_path, query))
 }
 
 #[tauri::command]

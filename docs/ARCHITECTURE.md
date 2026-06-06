@@ -167,8 +167,8 @@ TheBrain 正在建立从内容到行动和档案的模型：
 - `todo_items` 保存正式 TODO，包含来源候选、来源文件、标题、备注、截止时间、原始 payload、状态和完成/取消时间。
 - `schedule_items` 保存正式日程，包含来源候选、来源文件、标题、备注、开始/结束时间、全天、时区、地点、原始 payload、状态和完成/取消时间。
 - `promote_todo_schedule_candidate` 对同一候选幂等创建正式项，并把候选标记为 confirmed；被 rejected 的候选不能 promotion。
-- `list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 提供第一层列表、完成和取消能力。
-- 前端当前在仪表盘提供正式行动项标题/来源/备注搜索、TODO/日程类型过滤、active/all/completed/cancelled/archived 状态过滤和 Markdown 来源打开；项目页行动列表采用边界感知的 Vault 相对路径前缀匹配，避免 `Project` 误匹配 `ProjectX`。
+- `list_todo_items`、`list_schedule_items`、`search_todo_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 提供第一层列表、后端搜索/分页、完成和取消能力。
+- 前端当前在仪表盘调用 `search_todo_schedule_items` 提供正式行动项标题/来源/备注等结构化搜索、TODO/日程类型过滤、active/all/completed/cancelled/archived 状态过滤、分页加载和 Markdown 来源打开；项目页行动列表采用边界感知的 Vault 相对路径前缀匹配，避免 `Project` 误匹配 `ProjectX`。
 - 正式行动项当前是 `.thebrain/index.sqlite` 内部状态；不会写入 Markdown frontmatter，也不代表已经有提醒通知、重复日程、跨设备同步或完整 TickTick 式任务系统。
 
 关键决策尚未完成：
@@ -208,7 +208,7 @@ TheBrain 正在建立从内容到行动和档案的模型：
 - `retrieval.rs`：检索通道、范围过滤和评分。
 - `chunking.rs`：Markdown 分块。
 - `rag_trace.rs`：Trace 持久化。
-- `action_items.rs`：TODO/日程候选 promotion、正式 TODO/日程列表和状态更新。
+- `action_items.rs`：TODO/日程候选 promotion、正式 TODO/日程列表、后端搜索/分页和状态更新。
 - `workspace_insights.rs`：个人页和项目工作台的只读统计聚合。
 - `index.rs`：SQLite schema。
 - `budget.rs` / `usage.rs`：预算和用量。

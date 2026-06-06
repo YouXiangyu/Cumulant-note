@@ -659,6 +659,22 @@ export interface TodoScheduleItem extends CommandMeta {
   cancelledAt?: string;
 }
 
+export interface TodoScheduleSearchQuery {
+  query?: string;
+  kind?: "all" | TodoScheduleItemKind;
+  status?: "active" | "all" | TodoScheduleItemStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TodoScheduleSearchResult extends CommandMeta {
+  items: TodoScheduleItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  nextOffset?: number;
+}
+
 export interface CandidatePromotionResult extends CommandMeta {
   candidate: TodoScheduleCandidate;
   todoItem?: TodoScheduleItem;
@@ -1967,6 +1983,29 @@ function normalizeScheduleItem(raw: any): TodoScheduleItem {
   };
 }
 
+function normalizeTodoScheduleItem(raw: any): TodoScheduleItem {
+  const kind = raw?.kind ?? raw?.candidate_type;
+  return kind === "schedule" ? normalizeScheduleItem(raw) : normalizeTodoItem(raw);
+}
+
+function normalizeTodoScheduleSearchResult(raw: any, fallbackQuery?: TodoScheduleSearchQuery): TodoScheduleSearchResult {
+  const rawItems = Array.isArray(raw?.items) ? raw.items : [];
+  const limit = Number(raw?.limit ?? fallbackQuery?.limit ?? 20) || 20;
+  const offset = Number(raw?.offset ?? fallbackQuery?.offset ?? 0) || 0;
+  return {
+    items: rawItems.map(normalizeTodoScheduleItem),
+    total: Number(raw?.total ?? rawItems.length) || 0,
+    limit,
+    offset,
+    nextOffset:
+      raw?.nextOffset !== undefined || raw?.next_offset !== undefined
+        ? Number(raw.nextOffset ?? raw.next_offset)
+        : undefined,
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
+  };
+}
+
 function sortTodoScheduleItems(items: TodoScheduleItem[]): TodoScheduleItem[] {
   return [...items].sort((left, right) => {
     const leftDate = left.startsAt ?? left.dueAt ?? left.createdAt;
@@ -2591,6 +2630,19 @@ export const commands = {
     ]);
     return sortTodoScheduleItems([...todos, ...schedules]);
   },
+  searchTodoScheduleItems: (vaultPath: string, query: TodoScheduleSearchQuery) =>
+    invokeWithFallback<any>(
+      "search_todo_schedule_items",
+      { vaultPath, query },
+      (reason) => ({
+        items: [],
+        total: 0,
+        limit: query.limit ?? 20,
+        offset: query.offset ?? 0,
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then((result) => normalizeTodoScheduleSearchResult(result, query)),
   promoteTodoScheduleCandidate: (vaultPath: string, candidateId: string) =>
     invokeWithFallback<any>(
       "promote_todo_schedule_candidate",
