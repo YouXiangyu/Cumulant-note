@@ -824,6 +824,34 @@ textarea:focus {
   color: var(--muted);
 }
 
+.rag-citation-filter {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(160px, 1fr) minmax(180px, auto) auto 30px;
+}
+
+.rag-citation-filter label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rag-citation-filter label span,
+.rag-citation-filter small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rag-citation-filter input {
+  min-width: 0;
+  width: 100%;
+}
+
+.citation-channel-segmented {
+  justify-content: flex-start;
+}
+
 .rag-citations,
 .trace-list {
   display: flex;
@@ -2753,6 +2781,7 @@ kbd {
   .settings-grid,
   .project-grid,
   .rag-stats,
+  .rag-citation-filter,
   .status-metric-grid,
   .status-event-grid,
   .audit-filter-row,

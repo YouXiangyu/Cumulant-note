@@ -20,7 +20,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - 冲突问题与规则记忆第一版：前端可查看 open conflict、只读预览源/目标文件状态、文本片段和 bounded 只读 diff、选择处理动作、使用只读重命名建议、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中、启用/禁用/编辑状态和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
 - 收集箱整理状态面板与恢复动作第一版：集中展示 listener、queue、worker、resident worker、conflict、movement log 和 audit timeline 的状态、最近事件和最近错误；主操作区提供导入、递归扫描入队、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项恢复、批量恢复预览/确认、整理计划确认原因、audit 日期范围筛选/分页加载/详情展开、冲突规则处理、movement log 单项回滚和批量回滚预览/确认。
 - MiMo provider 路径、设置页 key 保存、BOM 污染检测、预算状态、用量占位账本和 fallback/pending 状态。
-- md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、Trace、会话历史、会话重命名/删除/搜索和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
+- md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、引用筛选、Trace、会话历史、会话重命名/删除/搜索和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
 - 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页已接入 Workspace Insights 第一版真实统计和正式 TODO/日程第一增量，学习曲线、项目级 Agent 历史、提醒通知和联系人档案仍是占位或后续目标。
 - TODO/日程正式行动系统第一增量：`action_candidates` 可 promotion 为 SQLite 内部的 `todo_items` / `schedule_items`，支持幂等创建、列表展示、完成和取消状态更新；当前不提供提醒通知、重复日程、Markdown 双写、人名档案或联系人关系。
 
@@ -146,7 +146,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 4. 可选：在设置页保存 MiMo API key，或设置 `MIMO_API_KEY`，或把 key 放入 `Vault/.secrets/mimo_api_key.txt` / 项目根目录 `.secrets/mimo_api_key.txt`。
 5. 在收集箱中导入文件或用便利贴快速捕获内容。
 6. 让 AI 对收集箱文件进行抽取、分类、移动、记录和回滚。
-7. 重建 RAG 索引后，选择全库、当前文件或当前目录/项目前缀范围提问，并查看、搜索、重命名或删除会话历史、引用和 Trace。
+7. 重建 RAG 索引后，选择全库、当前文件或当前目录/项目前缀范围提问，并查看、筛选引用，搜索、重命名或删除会话历史，以及检查 Trace。
 
 ## 已完成目标
 
@@ -176,7 +176,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - 全局快捷键插件依赖和注册命令已接入。
 - RAG 文档、分块、索引运行、查询、Trace、会话和消息基础表。
 - RAG 索引、状态、后台问答、引用、Trace、会话列表、会话详情、会话创建和范围检索基础命令。
-- RAG 多轮会话 UI 与历史列表第一版，支持新建/打开会话、保存 user/assistant 消息、会话重命名、会话历史删除、按标题/消息搜索历史，并在提问时选择全库、当前文件或当前目录/项目前缀范围。
+- RAG 多轮会话 UI 与历史列表第一版，支持新建/打开会话、保存 user/assistant 消息、会话重命名、会话历史删除、按标题/消息搜索历史、按引用路径/标题/片段和检索 channel 筛选当前回答引用，并在提问时选择全库、当前文件或当前目录/项目前缀范围。
 - Workspace Insights 命令 `get_workspace_insights` 和前端接入第一版：个人页/项目页可读取 Vault 文件、Markdown、项目目录、最近文件、RAG、候选、正式行动项、movement、audit 和 sticky 真实统计。
 
 ## 未完成目标
@@ -188,7 +188,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - 完整冲突解决 UI 增强：当前已有只读重命名建议、bounded preview、bounded 只读 diff 预览、动作选择、规则启用/禁用/编辑第一版；后续仍需更完整的 side-by-side/merge diff 体验、批量冲突处理、强确认的覆盖/重命名执行流和更细的恢复体验。
 - 更完整的状态面板和恢复体验：当前已有 audit 搜索/类型筛选/日期范围/分页/详情展开、队列批量恢复预览/确认和 movement 批量回滚预览/确认第一版；后续仍需长期审计分析、批量恢复差异预览、冲突恢复策略和更细粒度确认。
 - 真实 embedding、向量检索、重排模型、跨会话长期记忆策略和复杂个人统计。
-- RAG 会话增强：当前已有会话重命名、删除和按标题/消息搜索历史第一增量；后续仍需引用筛选、删除恢复/归档策略和更完整的跨会话长期记忆策略。
+- RAG 会话增强：当前已有会话重命名、删除、按标题/消息搜索历史和当前回答引用筛选第一增量；后续仍需引用排序/固定、删除恢复/归档策略和更完整的跨会话长期记忆策略。
 - PDF、DOCX、PPTX、URL 的真实解析。
 - 人名档案、联系人信息、会议纪要、通话记录和个人关系管理数据模型。
 - TODO/日程完整工作流增强：当前只有 SQLite 内部正式项第一增量；后续仍需提醒通知、重复日程、优先级、项目/文件引用定位、Markdown/YAML 双写或重建策略、批量确认、搜索过滤和更完整编辑体验。
@@ -214,4 +214,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview 和 bounded 只读 diff、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 会话重命名/删除/搜索、RAG 范围检索和 Workspace Insights 聚合。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview 和 bounded 只读 diff、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 会话重命名/删除/搜索、RAG 范围检索和 Workspace Insights 聚合；前端构建覆盖 RAG 引用筛选类型检查。

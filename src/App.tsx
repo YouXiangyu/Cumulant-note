@@ -93,6 +93,7 @@ import {
   QueueItem,
   QueueStatus,
   RagAnswer,
+  RagCitation,
   RagConversation,
   RagIndexRun,
   RagIndexStatus,
@@ -117,6 +118,7 @@ import {
 type ViewId = "dashboard" | "inbox" | "markdown" | "notes" | "personal" | "project" | "settings";
 type ImportBehavior = "copy" | "move";
 type RagScopeKind = RagScope["kind"];
+type RagCitationChannelFilter = "all" | string;
 type BatchRecoveryPreviewState =
   | { kind: "queue-retry" | "queue-skip"; preview: BatchQueueRecoveryPreview }
   | { kind: "rollback"; preview: BatchRollbackPreview };
@@ -251,6 +253,29 @@ function messageRoleLabel(role: string): string {
   if (role === "assistant") return "助手";
   if (role === "system") return "系统";
   return role;
+}
+
+function citationChannelLabel(channel: string): string {
+  const labels: Record<string, string> = {
+    keyword: "关键词",
+    local_semantic_placeholder: "本地语义",
+  };
+  return labels[channel] ?? channel;
+}
+
+function citationMatchesQuery(citation: RagCitation, query: string): boolean {
+  if (!query) return true;
+  const haystack = [
+    citation.id,
+    citation.title,
+    citation.relativePath,
+    citation.channel,
+    citation.headingPath.join(" "),
+    citation.snippet,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query.toLowerCase());
 }
 
 function formatBudget(cents: number): string {
@@ -466,6 +491,8 @@ export default function App() {
   const [ragMessages, setRagMessages] = useState<RagMessage[]>([]);
   const [ragConversationSearchText, setRagConversationSearchText] = useState("");
   const [ragConversationRenameTitle, setRagConversationRenameTitle] = useState("");
+  const [ragCitationSearchText, setRagCitationSearchText] = useState("");
+  const [ragCitationChannelFilter, setRagCitationChannelFilter] = useState<RagCitationChannelFilter>("all");
   const [ragScopeKind, setRagScopeKind] = useState<RagScopeKind>("allVault");
   const [ragHistoryNotice, setRagHistoryNotice] = useState("");
   const [exported, setExported] = useState("");
@@ -595,6 +622,25 @@ export default function App() {
   useEffect(() => {
     setRagConversationRenameTitle(activeConversation ? conversationTitle(activeConversation) : "");
   }, [activeConversation?.id, activeConversation?.title]);
+
+  const ragCitationChannels = useMemo(
+    () => Array.from(new Set((ragAnswer?.citations ?? []).map((citation) => citation.channel).filter(Boolean))).sort(),
+    [ragAnswer?.citations],
+  );
+
+  useEffect(() => {
+    if (ragCitationChannelFilter !== "all" && !ragCitationChannels.includes(ragCitationChannelFilter)) {
+      setRagCitationChannelFilter("all");
+    }
+  }, [ragCitationChannelFilter, ragCitationChannels]);
+
+  const filteredRagCitations = useMemo(() => {
+    const query = ragCitationSearchText.trim();
+    return (ragAnswer?.citations ?? []).filter((citation) => {
+      const channelMatches = ragCitationChannelFilter === "all" || citation.channel === ragCitationChannelFilter;
+      return channelMatches && citationMatchesQuery(citation, query);
+    });
+  }, [ragAnswer?.citations, ragCitationChannelFilter, ragCitationSearchText]);
 
   const currentMarkdownRelativePath = useMemo(() => {
     if (isMarkdownPath(markdownDoc?.relativePath)) return markdownDoc.relativePath;
@@ -1884,6 +1930,8 @@ export default function App() {
     setRagMessages([]);
     setRagAnswer(null);
     setRagTrace(null);
+    setRagCitationSearchText("");
+    setRagCitationChannelFilter("all");
     setRagHistoryNotice("");
     setActiveView("dashboard");
     setStatus("已准备新 RAG 对话");
@@ -1977,6 +2025,8 @@ export default function App() {
     setRagMessages([]);
     setRagAnswer(null);
     setRagTrace(null);
+    setRagCitationSearchText("");
+    setRagCitationChannelFilter("all");
     setRagHistoryNotice(`已删除 RAG 会话历史和 ${result.deletedMessages} 条消息；Vault 文件未改动。`);
   }
 
@@ -2970,8 +3020,47 @@ export default function App() {
           ) : (
             <p className="empty-state">暂无 RAG 回答</p>
           )}
+          {(ragAnswer?.citations.length ?? 0) > 0 ? (
+            <div className="rag-citation-filter">
+              <label>
+                <span>引用</span>
+                <input
+                  aria-label="筛选 RAG 引用"
+                  value={ragCitationSearchText}
+                  placeholder="路径、标题或片段"
+                  onChange={(event) => setRagCitationSearchText(event.target.value)}
+                />
+              </label>
+              <div className="scope-segmented citation-channel-segmented" aria-label="RAG 引用来源">
+                <button
+                  type="button"
+                  className={ragCitationChannelFilter === "all" ? "active" : undefined}
+                  onClick={() => setRagCitationChannelFilter("all")}
+                >
+                  全部
+                </button>
+                {ragCitationChannels.map((channel) => (
+                  <button
+                    type="button"
+                    className={ragCitationChannelFilter === channel ? "active" : undefined}
+                    key={channel}
+                    onClick={() => setRagCitationChannelFilter(channel)}
+                  >
+                    {citationChannelLabel(channel)}
+                  </button>
+                ))}
+              </div>
+              <small>{filteredRagCitations.length} / {ragAnswer?.citations.length ?? 0}</small>
+              <button type="button" className="tiny-icon-button" title="清除引用筛选" onClick={() => {
+                setRagCitationSearchText("");
+                setRagCitationChannelFilter("all");
+              }}>
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
           <div className="rag-citations">
-            {(ragAnswer?.citations ?? []).map((citation) => {
+            {filteredRagCitations.map((citation) => {
               const canOpen = /\.(md|markdown)$/i.test(citation.relativePath);
               return (
                 <button
@@ -2992,6 +3081,9 @@ export default function App() {
                 </button>
               );
             })}
+            {(ragAnswer?.citations.length ?? 0) > 0 && filteredRagCitations.length === 0 ? (
+              <p className="empty-state">当前引用筛选没有匹配结果</p>
+            ) : null}
           </div>
         </article>
 
