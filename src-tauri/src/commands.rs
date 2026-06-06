@@ -1514,6 +1514,12 @@ fn candidate_payload(item: &Value, decision: &OrganizeDecision) -> Value {
         "targetRelativePath".to_string(),
         Value::String(decision.target_relative_path.clone()),
     );
+    if let Some(target_archive_dir) = &decision.target_archive_dir {
+        payload.insert(
+            "targetArchiveDir".to_string(),
+            Value::String(target_archive_dir.clone()),
+        );
+    }
     payload.insert(
         "planStatus".to_string(),
         Value::String(decision.status.clone()),
@@ -1522,6 +1528,35 @@ fn candidate_payload(item: &Value, decision: &OrganizeDecision) -> Value {
         "planProvider".to_string(),
         Value::String(decision.provider.clone()),
     );
+    payload.insert(
+        "archiveMapMatched".to_string(),
+        Value::Bool(decision.archive_map_matched),
+    );
+    payload.insert(
+        "proposesNewDirectory".to_string(),
+        Value::Bool(decision.proposes_new_directory),
+    );
+    payload.insert(
+        "confirmationRequired".to_string(),
+        Value::Bool(decision.confirmation_required),
+    );
+    payload.insert(
+        "confirmationReasons".to_string(),
+        Value::Array(
+            decision
+                .confirmation_reasons
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    if let Some(new_directory_reason) = &decision.new_directory_reason {
+        payload.insert(
+            "newDirectoryReason".to_string(),
+            Value::String(new_directory_reason.clone()),
+        );
+    }
     Value::Object(payload)
 }
 

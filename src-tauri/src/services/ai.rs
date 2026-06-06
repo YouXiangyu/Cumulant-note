@@ -100,6 +100,18 @@ pub struct OrganizeDecision {
     pub is_mock: bool,
     pub source_relative_path: String,
     pub target_relative_path: String,
+    #[serde(default)]
+    pub target_archive_dir: Option<String>,
+    #[serde(default)]
+    pub archive_map_matched: bool,
+    #[serde(default)]
+    pub proposes_new_directory: bool,
+    #[serde(default)]
+    pub confirmation_required: bool,
+    #[serde(default)]
+    pub confirmation_reasons: Vec<String>,
+    #[serde(default)]
+    pub new_directory_reason: Option<String>,
     pub tags: Vec<String>,
     pub summary: String,
     pub reason: String,
@@ -503,42 +515,73 @@ fn parse_organize_response(
     let target_raw = string_field(&value, &["targetRelativePath", "target_relative_path"])
         .ok_or_else(|| ServiceError::InvalidState("missing targetRelativePath".to_string()))?;
     let target = normalize_relative_path(&target_raw)?;
-    let mut status = "ok".to_string();
-    let mut error = None;
+    let target_archive_dir = target_parent_dir(&target);
+    let archive_map_matched = target_archive_dir
+        .as_deref()
+        .map(|parent| {
+            archive_map
+                .map(|map| ArchiveMapService::contains_directory(map, parent))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let proposes_new_directory = target_archive_dir.is_some() && !archive_map_matched;
+    let mut confirmation_reasons = Vec::new();
 
-    if target.starts_with(&format!("{INBOX_DIR}/")) {
-        status = "pending".to_string();
-        error = Some("target_inside_inbox".to_string());
+    if target == INBOX_DIR || target.starts_with(&format!("{INBOX_DIR}/")) {
+        add_confirmation_reason(&mut confirmation_reasons, "target_inside_inbox");
     }
     let root = canonical_vault_root(vault_path)?;
     if root.join(&target).exists() {
-        status = "pending".to_string();
-        error = Some("target_conflict".to_string());
+        add_confirmation_reason(&mut confirmation_reasons, "target_conflict");
     }
-    if status == "ok" {
-        match target_parent_dir(&target) {
-            Some(parent)
-                if archive_map
-                    .map(|map| ArchiveMapService::contains_directory(map, &parent))
-                    .unwrap_or(false) => {}
-            Some(_) => {
-                status = "pending".to_string();
-                error = Some("target_not_in_archive_map".to_string());
-            }
-            None => {
-                status = "pending".to_string();
-                error = Some("target_missing_archive_directory".to_string());
-            }
-        }
+    match target_archive_dir.as_deref() {
+        Some(_) if archive_map_matched => {}
+        Some(_) => add_confirmation_reason(&mut confirmation_reasons, "target_not_in_archive_map"),
+        None => add_confirmation_reason(
+            &mut confirmation_reasons,
+            "target_missing_archive_directory",
+        ),
     }
 
     let confidence = number_field(&value, &["confidence"])
         .unwrap_or(0.0)
         .clamp(0.0, 1.0) as f32;
-    if confidence < MIN_AUTO_CONFIDENCE && status == "ok" {
-        status = "pending".to_string();
-        error = Some("low_confidence".to_string());
+    if confidence < MIN_AUTO_CONFIDENCE {
+        add_confirmation_reason(&mut confirmation_reasons, "low_confidence");
     }
+    if bool_field(
+        &value,
+        &[
+            "classificationBoundaryIssue",
+            "classification_boundary_issue",
+        ],
+    )
+    .unwrap_or(false)
+    {
+        add_confirmation_reason(&mut confirmation_reasons, "classification_boundary_issue");
+    }
+    let confirmation_required = !confirmation_reasons.is_empty();
+    let status = if confirmation_required {
+        "pending".to_string()
+    } else {
+        "ok".to_string()
+    };
+    let error = confirmation_reasons.first().cloned();
+    let reason = string_field(&value, &["reason"]).unwrap_or_default();
+    let new_directory_reason = if proposes_new_directory {
+        string_field(
+            &value,
+            &[
+                "newDirectoryReason",
+                "new_directory_reason",
+                "directoryReason",
+                "directory_reason",
+            ],
+        )
+        .or_else(|| (!reason.is_empty()).then_some(reason.clone()))
+    } else {
+        None
+    };
 
     Ok(OrganizeDecision {
         provider: "mimo".to_string(),
@@ -547,9 +590,15 @@ fn parse_organize_response(
         is_mock: false,
         source_relative_path: source.to_string(),
         target_relative_path: target,
+        target_archive_dir,
+        archive_map_matched,
+        proposes_new_directory,
+        confirmation_required,
+        confirmation_reasons,
+        new_directory_reason,
         tags: string_array_field(&value, &["tags"]),
         summary: string_field(&value, &["summary"]).unwrap_or_default(),
-        reason: string_field(&value, &["reason"]).unwrap_or_default(),
+        reason,
         confidence,
         todo_candidates: value_array_field(&value, &["todoCandidates", "todo_candidates"]),
         schedule_candidates: value_array_field(
@@ -576,6 +625,11 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
 fn number_field(value: &Value, keys: &[&str]) -> Option<f64> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_f64))
+}
+
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_bool))
 }
 
 fn string_array_field(value: &Value, keys: &[&str]) -> Vec<String> {
@@ -607,6 +661,12 @@ fn target_parent_dir(target: &str) -> Option<String> {
         .and_then(|path| normalize_relative_path(&path).ok())
 }
 
+fn add_confirmation_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|item| item == reason) {
+        reasons.push(reason.to_string());
+    }
+}
+
 fn fallback_extract(relative_path: &str, status: &str, reason: &str) -> MimoExtractResult {
     MimoExtractResult {
         provider: "mock".to_string(),
@@ -631,6 +691,12 @@ fn fallback_decision(source: &str, status: &str, reason: &str) -> OrganizeDecisi
         is_mock: true,
         source_relative_path: source.to_string(),
         target_relative_path: format!("100-Organized/{file_name}"),
+        target_archive_dir: Some("100-Organized".to_string()),
+        archive_map_matched: false,
+        proposes_new_directory: false,
+        confirmation_required: true,
+        confirmation_reasons: vec![status.to_string()],
+        new_directory_reason: None,
         tags: vec!["inbox".to_string()],
         summary: "Fallback organization decision.".to_string(),
         reason: reason.to_string(),
@@ -870,6 +936,11 @@ mod tests {
         assert_eq!(decision.status, "ok");
         assert_eq!(decision.source_relative_path, source);
         assert_eq!(decision.target_relative_path, "100-School/note.md");
+        assert_eq!(decision.target_archive_dir.as_deref(), Some("100-School"));
+        assert!(decision.archive_map_matched);
+        assert!(!decision.proposes_new_directory);
+        assert!(!decision.confirmation_required);
+        assert!(decision.confirmation_reasons.is_empty());
         assert_eq!(decision.todo_candidates.len(), 1);
     }
 
@@ -912,5 +983,76 @@ mod tests {
 
         assert_eq!(decision.status, "pending");
         assert_eq!(decision.error.as_deref(), Some("target_not_in_archive_map"));
+        assert_eq!(decision.target_archive_dir.as_deref(), Some("999-New"));
+        assert!(!decision.archive_map_matched);
+        assert!(decision.proposes_new_directory);
+        assert!(decision.confirmation_required);
+        assert_eq!(
+            decision.confirmation_reasons,
+            vec!["target_not_in_archive_map".to_string()]
+        );
+        assert_eq!(
+            decision.new_directory_reason.as_deref(),
+            Some("new category")
+        );
+    }
+
+    #[test]
+    fn organize_parser_marks_low_confidence_pending_even_with_archive_map_match() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        let archive_map =
+            crate::services::archive_map::ArchiveMapService::rebuild(temp.path().to_str().unwrap())
+                .unwrap();
+        let source = format!("{INBOX_DIR}/note.md");
+
+        let decision = parse_organize_response(
+            temp.path().to_str().unwrap(),
+            &source,
+            r#"{"targetRelativePath":"100-School/note.md","confidence":0.42,"reason":"weak match"}"#,
+            Some(&archive_map),
+        )
+        .unwrap();
+
+        assert_eq!(decision.status, "pending");
+        assert_eq!(decision.error.as_deref(), Some("low_confidence"));
+        assert!(decision.archive_map_matched);
+        assert!(!decision.proposes_new_directory);
+        assert!(decision.confirmation_required);
+        assert_eq!(
+            decision.confirmation_reasons,
+            vec!["low_confidence".to_string()]
+        );
+    }
+
+    #[test]
+    fn organize_parser_marks_existing_target_conflict_with_archive_map_match() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        fs::write(temp.path().join("100-School").join("note.md"), "existing").unwrap();
+        let archive_map =
+            crate::services::archive_map::ArchiveMapService::rebuild(temp.path().to_str().unwrap())
+                .unwrap();
+        let source = format!("{INBOX_DIR}/note.md");
+
+        let decision = parse_organize_response(
+            temp.path().to_str().unwrap(),
+            &source,
+            r#"{"targetRelativePath":"100-School/note.md","confidence":0.92,"reason":"strong match"}"#,
+            Some(&archive_map),
+        )
+        .unwrap();
+
+        assert_eq!(decision.status, "pending");
+        assert_eq!(decision.error.as_deref(), Some("target_conflict"));
+        assert!(decision.archive_map_matched);
+        assert!(!decision.proposes_new_directory);
+        assert!(decision.confirmation_required);
+        assert_eq!(
+            decision.confirmation_reasons,
+            vec!["target_conflict".to_string()]
+        );
     }
 }

@@ -87,6 +87,7 @@ import {
   MimoExtractResult,
   MimoStatus,
   MoveLog,
+  OrganizeDecisionMetadata,
   QueueItem,
   QueueStatus,
   RagAnswer,
@@ -248,6 +249,59 @@ function formatBytes(value?: number): string {
 
 function percentage(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function confirmationReasonLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    target_inside_inbox: "目标仍在收集箱内",
+    target_conflict: "目标文件已存在",
+    target_not_in_archive_map: "目标目录不在 Archive Map",
+    target_missing_archive_directory: "目标缺少归档目录",
+    low_confidence: "置信度低",
+    classification_boundary_issue: "分类边界不清",
+    forced_mock: "mock 计划",
+    missing_key: "缺少 MiMo key",
+    budget_blocked: "预算阻断",
+    parse_error: "AI 响应解析失败",
+    fallback: "降级结果",
+  };
+  return labels[reason] ?? reason;
+}
+
+function decisionMetadataFromPayload(payload?: Record<string, unknown>): OrganizeDecisionMetadata | undefined {
+  if (!payload) return undefined;
+  const confirmationReasons = Array.isArray(payload.confirmationReasons)
+    ? payload.confirmationReasons.map((item) => String(item)).filter(Boolean)
+    : [];
+  if (
+    payload.targetArchiveDir === undefined &&
+    payload.archiveMapMatched === undefined &&
+    payload.proposesNewDirectory === undefined &&
+    payload.confirmationRequired === undefined &&
+    confirmationReasons.length === 0 &&
+    payload.newDirectoryReason === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    targetArchiveDir: typeof payload.targetArchiveDir === "string" ? payload.targetArchiveDir : undefined,
+    archiveMapMatched: Boolean(payload.archiveMapMatched),
+    proposesNewDirectory: Boolean(payload.proposesNewDirectory),
+    confirmationRequired: Boolean(payload.confirmationRequired),
+    confirmationReasons,
+    newDirectoryReason: typeof payload.newDirectoryReason === "string" ? payload.newDirectoryReason : undefined,
+  };
+}
+
+function decisionMetadataSummary(metadata?: OrganizeDecisionMetadata): string | undefined {
+  if (!metadata) return undefined;
+  const parts = [
+    metadata.archiveMapMatched ? "Archive Map 已命中" : "Archive Map 未命中",
+    metadata.targetArchiveDir ? `目录 ${metadata.targetArchiveDir}` : undefined,
+    metadata.proposesNewDirectory ? "建议新目录" : undefined,
+    metadata.confirmationRequired ? "需要确认" : undefined,
+  ].filter(Boolean);
+  return parts.join(" / ");
 }
 
 function hasFallback(value: unknown): boolean {
@@ -1183,6 +1237,12 @@ export default function App() {
           id: result.plan.sourceRelativePath,
           sourceRelativePath: result.plan.sourceRelativePath,
           targetRelativePath: result.plan.targetRelativePath,
+          targetArchiveDir: result.plan.targetArchiveDir,
+          archiveMapMatched: result.plan.archiveMapMatched,
+          proposesNewDirectory: result.plan.proposesNewDirectory,
+          confirmationRequired: result.plan.confirmationRequired,
+          confirmationReasons: result.plan.confirmationReasons,
+          newDirectoryReason: result.plan.newDirectoryReason,
           confidence: result.plan.confidence,
           reason: result.plan.reason || result.plan.error || "",
           tags: result.plan.tags,
@@ -1528,6 +1588,9 @@ export default function App() {
     const sourceSnippet = boundedSnippet(preview?.sourceSnippet ?? preview?.source?.snippet);
     const targetSnippet = boundedSnippet(preview?.targetSnippet ?? preview?.target?.snippet);
     const context = boundedSnippet(preview?.context);
+    const decisionMetadata = decisionMetadataFromPayload(conflict.payload);
+    const metadataSummary = decisionMetadataSummary(decisionMetadata);
+    const reasonLabels = decisionMetadata?.confirmationReasons.map(confirmationReasonLabel) ?? [];
     return (
       <>
         {rule ? (
@@ -1538,6 +1601,13 @@ export default function App() {
         ) : (
           <small>No matching rule yet. Record one after choosing an action.</small>
         )}
+        {decisionMetadata ? (
+          <div className="conflict-metadata-detail">
+            {metadataSummary ? <small>{metadataSummary}</small> : null}
+            {reasonLabels.length > 0 ? <small>确认原因：{reasonLabels.join(" / ")}</small> : null}
+            {decisionMetadata.newDirectoryReason ? <small>新目录理由：{decisionMetadata.newDirectoryReason}</small> : null}
+          </div>
+        ) : null}
         {preview ? (
           <div className="conflict-preview">
             <small>Preview: source {sourceExists === undefined ? "unknown" : sourceExists ? "exists" : "missing"} / {formatBytes(sourceSize)}; target {targetExists === undefined ? "unknown" : targetExists ? "exists" : "missing"} / {formatBytes(targetSize)}</small>
@@ -1841,7 +1911,12 @@ export default function App() {
       payload.message ??
       payload.skippedReason ??
       "未记录具体原因";
-    return String(message);
+    const metadata = decisionMetadataFromPayload(payload);
+    const metadataSummary = decisionMetadataSummary(metadata);
+    const reasonLabels = metadata?.confirmationReasons.map(confirmationReasonLabel) ?? [];
+    return [String(message), metadataSummary, reasonLabels.length > 0 ? `确认原因：${reasonLabels.join(" / ")}` : undefined]
+      .filter(Boolean)
+      .join(" / ");
   }
 
   function auditPayloadSummary(event: AuditEvent): string {
@@ -2915,11 +2990,17 @@ export default function App() {
                 <span>
                   worker {workerRunResult.status}: processed {workerRunResult.processed}, moved {workerRunResult.moved}, failed {workerRunResult.failed}, conflicts {workerRunResult.conflicts}
                 </span>
-                {workerRunResult.items.slice(0, 3).map((item) => (
-                  <span key={item.queueId}>
-                    #{item.queueId} {item.status}: {item.relativePath} {item.message}
-                  </span>
-                ))}
+                {workerRunResult.items.slice(0, 3).map((item) => {
+                  const metadataSummary = decisionMetadataSummary(item.decisionMetadata);
+                  const reasonLabels = item.decisionMetadata?.confirmationReasons.map(confirmationReasonLabel) ?? [];
+                  return (
+                    <span key={item.queueId}>
+                      #{item.queueId} {item.status}: {item.relativePath} {item.message}
+                      {metadataSummary ? ` / ${metadataSummary}` : ""}
+                      {reasonLabels.length > 0 ? ` / 确认原因：${reasonLabels.join(" / ")}` : ""}
+                    </span>
+                  );
+                })}
               </div>
             ) : null}
             {listenerStatus ? (
@@ -3019,13 +3100,21 @@ export default function App() {
                   回滚
                 </button>
               </div>
-              {inboxPlanResult ? (
-                <div className="plan-detail">
-                  <span>{inboxPlanResult.plan.provider}/{inboxPlanResult.plan.model}</span>
-                  <strong>{percentage(inboxPlanResult.plan.confidence)}</strong>
-                  <p>{inboxPlanResult.plan.reason || inboxPlanResult.plan.error || inboxPlanResult.plan.summary}</p>
-                </div>
-              ) : null}
+              {inboxPlanResult ? (() => {
+                const plan = inboxPlanResult.plan;
+                const metadataSummary = decisionMetadataSummary(plan);
+                const reasonLabels = plan.confirmationReasons.map(confirmationReasonLabel);
+                return (
+                  <div className="plan-detail">
+                    <span>{plan.provider}/{plan.model}</span>
+                    <strong>{percentage(plan.confidence)}</strong>
+                    <p>{plan.reason || plan.error || plan.summary}</p>
+                    {metadataSummary ? <small>{metadataSummary}</small> : null}
+                    {reasonLabels.length > 0 ? <small>确认原因：{reasonLabels.join(" / ")}</small> : null}
+                    {plan.newDirectoryReason ? <small>新目录理由：{plan.newDirectoryReason}</small> : null}
+                  </div>
+                );
+              })() : null}
             </section>
             {renderMovementLogPanel()}
             {renderAuditTimelinePanel()}

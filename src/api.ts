@@ -357,6 +357,15 @@ export interface QueueItem extends CommandMeta {
   updatedAt: string;
 }
 
+export interface OrganizeDecisionMetadata {
+  targetArchiveDir?: string;
+  archiveMapMatched: boolean;
+  proposesNewDirectory: boolean;
+  confirmationRequired: boolean;
+  confirmationReasons: string[];
+  newDirectoryReason?: string;
+}
+
 export interface WorkerStatus extends CommandMeta {
   listener: {
     enabled: boolean;
@@ -408,6 +417,7 @@ export interface WorkerRunItem {
   status: string;
   message: string;
   movementId?: number;
+  decisionMetadata?: OrganizeDecisionMetadata;
 }
 
 export interface WorkerRunResult extends CommandMeta {
@@ -441,6 +451,12 @@ export interface OrganizeCandidate extends CommandMeta {
   id: string;
   sourceRelativePath: string;
   targetRelativePath: string;
+  targetArchiveDir?: string;
+  archiveMapMatched?: boolean;
+  proposesNewDirectory?: boolean;
+  confirmationRequired?: boolean;
+  confirmationReasons?: string[];
+  newDirectoryReason?: string;
   confidence: number;
   reason: string;
   tags: string[];
@@ -476,6 +492,12 @@ export interface OrganizeDecisionResult extends CommandMeta {
   isMock: boolean;
   sourceRelativePath: string;
   targetRelativePath: string;
+  targetArchiveDir?: string;
+  archiveMapMatched: boolean;
+  proposesNewDirectory: boolean;
+  confirmationRequired: boolean;
+  confirmationReasons: string[];
+  newDirectoryReason?: string;
   tags: string[];
   summary: string;
   reason: string;
@@ -1222,6 +1244,11 @@ function fallbackOrganizePlan(reason: string): AiOrganizePlan {
         id: "fallback-candidate-1",
         sourceRelativePath: "000-收集箱/示例笔记.md",
         targetRelativePath: "100-项目/示例笔记.md",
+        targetArchiveDir: "100-项目",
+        archiveMapMatched: false,
+        proposesNewDirectory: false,
+        confirmationRequired: true,
+        confirmationReasons: ["fallback"],
         confidence: 0.72,
         reason: "根据标题与内容关键词建议归入项目资料。",
         tags: ["项目", "待确认"],
@@ -1535,9 +1562,51 @@ function normalizeBudgetStatus(raw: any): BudgetStatus {
   };
 }
 
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => String(item)).filter(Boolean)
+    : [];
+}
+
+function normalizeOrganizeDecision(raw: any): OrganizeDecisionResult {
+  const error = raw?.error ? String(raw.error) : undefined;
+  const confirmationReasons = stringList(raw?.confirmationReasons);
+  const inferredReasons = confirmationReasons.length > 0
+    ? confirmationReasons
+    : error
+      ? [error]
+      : [];
+  const confirmationRequired = raw?.confirmationRequired !== undefined
+    ? Boolean(raw.confirmationRequired)
+    : Boolean(raw?.status === "pending" || raw?.isMock || error);
+  return {
+    provider: raw?.provider ?? "mock",
+    model: raw?.model ?? "mimo-v2.5-pro",
+    status: raw?.status ?? "fallback",
+    isMock: Boolean(raw?.isMock),
+    sourceRelativePath: raw?.sourceRelativePath ?? "",
+    targetRelativePath: raw?.targetRelativePath ?? "",
+    targetArchiveDir: raw?.targetArchiveDir,
+    archiveMapMatched: Boolean(raw?.archiveMapMatched),
+    proposesNewDirectory: Boolean(raw?.proposesNewDirectory),
+    confirmationRequired,
+    confirmationReasons: inferredReasons,
+    newDirectoryReason: raw?.newDirectoryReason,
+    tags: stringList(raw?.tags),
+    summary: raw?.summary ?? "",
+    reason: raw?.reason ?? "",
+    confidence: Number(raw?.confidence ?? 0),
+    todoCandidates: Array.isArray(raw?.todoCandidates) ? raw.todoCandidates : [],
+    scheduleCandidates: Array.isArray(raw?.scheduleCandidates) ? raw.scheduleCandidates : [],
+    error,
+    isFallback: raw?.isFallback,
+    fallbackReason: raw?.fallbackReason,
+  };
+}
+
 function normalizeOrganizePlan(raw: any): AiOrganizePlan {
   if (raw?.plan) {
-    const plan = raw.plan as OrganizeDecisionResult;
+    const plan = normalizeOrganizeDecision(raw.plan);
     return {
       id: `${plan.provider ?? "mimo"}-${Date.now()}`,
       summary:
@@ -1549,6 +1618,12 @@ function normalizeOrganizePlan(raw: any): AiOrganizePlan {
           id: plan.sourceRelativePath,
           sourceRelativePath: plan.sourceRelativePath,
           targetRelativePath: plan.targetRelativePath,
+          targetArchiveDir: plan.targetArchiveDir,
+          archiveMapMatched: plan.archiveMapMatched ?? false,
+          proposesNewDirectory: plan.proposesNewDirectory ?? false,
+          confirmationRequired: plan.confirmationRequired ?? false,
+          confirmationReasons: plan.confirmationReasons ?? [],
+          newDirectoryReason: plan.newDirectoryReason,
           confidence: plan.confidence ?? 0,
           reason: plan.reason ?? plan.error ?? "",
           tags: plan.tags ?? [],
@@ -1564,22 +1639,29 @@ function normalizeOrganizePlan(raw: any): AiOrganizePlan {
   if (!raw || typeof raw !== "object" || "candidates" in raw) {
     return raw as AiOrganizePlan;
   }
+  const plan = normalizeOrganizeDecision(raw);
   return {
-    id: `${raw.provider ?? "mimo"}-${Date.now()}`,
-    summary: raw.summary ?? raw.reason ?? "整理计划已生成",
+    id: `${plan.provider ?? "mimo"}-${Date.now()}`,
+    summary: plan.summary ?? plan.reason ?? "整理计划已生成",
     candidates: [
       {
-        id: raw.sourceRelativePath ?? "candidate-1",
-        sourceRelativePath: raw.sourceRelativePath,
-        targetRelativePath: raw.targetRelativePath,
-        confidence: raw.confidence ?? 0,
-        reason: raw.reason ?? "",
-        tags: raw.tags ?? [],
+        id: plan.sourceRelativePath ?? "candidate-1",
+        sourceRelativePath: plan.sourceRelativePath,
+        targetRelativePath: plan.targetRelativePath,
+        targetArchiveDir: plan.targetArchiveDir,
+        archiveMapMatched: plan.archiveMapMatched,
+        proposesNewDirectory: plan.proposesNewDirectory,
+        confirmationRequired: plan.confirmationRequired,
+        confirmationReasons: plan.confirmationReasons,
+        newDirectoryReason: plan.newDirectoryReason,
+        confidence: plan.confidence ?? 0,
+        reason: plan.reason ?? "",
+        tags: plan.tags ?? [],
       },
     ],
     createdAt: nowIso(),
-    isFallback: raw.isMock,
-    fallbackReason: raw.error,
+    isFallback: plan.isMock,
+    fallbackReason: plan.error,
   };
 }
 
@@ -2272,6 +2354,12 @@ export const commands = {
           isMock: true,
           sourceRelativePath,
           targetRelativePath: sourceRelativePath.replace(/^000-[^/]+\//, "100-Organized/"),
+          targetArchiveDir: "100-Organized",
+          archiveMapMatched: false,
+          proposesNewDirectory: false,
+          confirmationRequired: true,
+          confirmationReasons: ["fallback"],
+          newDirectoryReason: undefined,
           tags: ["inbox"],
           summary: "Fallback organization decision.",
           reason,
@@ -2287,6 +2375,7 @@ export const commands = {
       }),
     ).then((raw) => ({
       ...raw,
+      plan: normalizeOrganizeDecision(raw.plan),
       candidates: (raw.candidates ?? []).map(normalizeCandidate),
       budget: normalizeBudgetStatus(raw.budget),
     }) as InboxPlanResult),

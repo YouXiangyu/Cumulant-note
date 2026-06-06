@@ -1,4 +1,4 @@
-use crate::services::ai::{MimoExtractInput, MimoProvider};
+use crate::services::ai::{MimoExtractInput, MimoProvider, OrganizeDecision};
 use crate::services::audit::AuditService;
 use crate::services::budget::BudgetService;
 use crate::services::conflict_rules::ConflictRuleService;
@@ -34,6 +34,19 @@ pub struct WorkerItemResult {
     pub status: String,
     pub message: String,
     pub movement_id: Option<i64>,
+    #[serde(default)]
+    pub decision_metadata: Option<OrganizeDecisionMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeDecisionMetadata {
+    pub target_archive_dir: Option<String>,
+    pub archive_map_matched: bool,
+    pub proposes_new_directory: bool,
+    pub confirmation_required: bool,
+    pub confirmation_reasons: Vec<String>,
+    pub new_directory_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +307,7 @@ impl WorkerService {
             force_mock,
         )?;
         if decision.status != "ok" || decision.is_mock {
+            let metadata = decision_metadata(&decision);
             let message = decision
                 .error
                 .clone()
@@ -303,7 +317,13 @@ impl WorkerService {
             } else {
                 "failed"
             };
-            QueueService::finish(vault_path, item.id, queue_status, Some(&message))?;
+            QueueService::finish_with_payload(
+                vault_path,
+                item.id,
+                queue_status,
+                Some(&message),
+                Some(decision_metadata_payload(&metadata)),
+            )?;
             let recommendations = conflict_recommendations(
                 vault_path,
                 &relative_path,
@@ -320,17 +340,31 @@ impl WorkerService {
                 json!({
                     "queueId": item.id,
                     "sourceRelativePath": relative_path,
-                    "targetRelativePath": decision.target_relative_path,
+                    "targetRelativePath": decision.target_relative_path.clone(),
                     "status": "open",
                     "stage": "plan",
                     "isMock": decision.is_mock,
+                    "confidence": decision.confidence,
+                    "targetArchiveDir": decision.target_archive_dir.clone(),
+                    "archiveMapMatched": decision.archive_map_matched,
+                    "proposesNewDirectory": decision.proposes_new_directory,
+                    "confirmationRequired": decision.confirmation_required,
+                    "confirmationReasons": decision.confirmation_reasons.clone(),
+                    "newDirectoryReason": decision.new_directory_reason.clone(),
                     "reason": message,
                     "recommendedRules": recommendations
                 }),
             )?;
-            return Ok(item_result(item, queue_status, message, None));
+            return Ok(item_result_with_metadata(
+                item,
+                queue_status,
+                message,
+                None,
+                Some(metadata),
+            ));
         }
 
+        let metadata = decision_metadata(&decision);
         match MovementService::move_from_inbox(
             vault_path,
             MoveRequest {
@@ -340,7 +374,13 @@ impl WorkerService {
             },
         ) {
             Ok(log) => {
-                QueueService::finish(vault_path, item.id, "completed", None)?;
+                QueueService::finish_with_payload(
+                    vault_path,
+                    item.id,
+                    "completed",
+                    None,
+                    Some(decision_metadata_payload(&metadata)),
+                )?;
                 AuditService::record(
                     vault_path,
                     "worker_moved",
@@ -348,19 +388,31 @@ impl WorkerService {
                         "queueId": item.id,
                         "movementId": log.id,
                         "sourceRelativePath": relative_path,
-                        "targetRelativePath": decision.target_relative_path,
+                        "targetRelativePath": decision.target_relative_path.clone(),
+                        "targetArchiveDir": decision.target_archive_dir.clone(),
+                        "archiveMapMatched": decision.archive_map_matched,
+                        "proposesNewDirectory": decision.proposes_new_directory,
+                        "confirmationRequired": decision.confirmation_required,
+                        "confirmationReasons": decision.confirmation_reasons.clone(),
                         "confidence": decision.confidence
                     }),
                 )?;
-                Ok(item_result(
+                Ok(item_result_with_metadata(
                     item,
                     "moved",
                     "worker moved inbox item".to_string(),
                     Some(log.id),
+                    Some(metadata),
                 ))
             }
             Err(ServiceError::Conflict(message)) => {
-                QueueService::finish(vault_path, item.id, "conflict", Some(&message))?;
+                QueueService::finish_with_payload(
+                    vault_path,
+                    item.id,
+                    "conflict",
+                    Some(&message),
+                    Some(decision_metadata_payload(&metadata)),
+                )?;
                 let recommendations = conflict_recommendations(
                     vault_path,
                     &relative_path,
@@ -373,14 +425,27 @@ impl WorkerService {
                     json!({
                         "queueId": item.id,
                         "sourceRelativePath": relative_path,
-                        "targetRelativePath": decision.target_relative_path,
+                        "targetRelativePath": decision.target_relative_path.clone(),
                         "status": "open",
                         "stage": "move",
+                        "confidence": decision.confidence,
+                        "targetArchiveDir": decision.target_archive_dir.clone(),
+                        "archiveMapMatched": decision.archive_map_matched,
+                        "proposesNewDirectory": decision.proposes_new_directory,
+                        "confirmationRequired": decision.confirmation_required,
+                        "confirmationReasons": decision.confirmation_reasons.clone(),
+                        "newDirectoryReason": decision.new_directory_reason.clone(),
                         "reason": message,
                         "recommendedRules": recommendations
                     }),
                 )?;
-                Ok(item_result(item, "conflict", message, None))
+                Ok(item_result_with_metadata(
+                    item,
+                    "conflict",
+                    message,
+                    None,
+                    Some(metadata),
+                ))
             }
             Err(error @ ServiceError::Io(_)) => {
                 let message = error.to_string();
@@ -450,13 +515,46 @@ fn item_result(
     message: String,
     movement_id: Option<i64>,
 ) -> WorkerItemResult {
+    item_result_with_metadata(item, status, message, movement_id, None)
+}
+
+fn item_result_with_metadata(
+    item: &QueueItem,
+    status: &str,
+    message: String,
+    movement_id: Option<i64>,
+    decision_metadata: Option<OrganizeDecisionMetadata>,
+) -> WorkerItemResult {
     WorkerItemResult {
         queue_id: item.id,
         relative_path: item.relative_path.clone(),
         status: status.to_string(),
         message,
         movement_id,
+        decision_metadata,
     }
+}
+
+fn decision_metadata(decision: &OrganizeDecision) -> OrganizeDecisionMetadata {
+    OrganizeDecisionMetadata {
+        target_archive_dir: decision.target_archive_dir.clone(),
+        archive_map_matched: decision.archive_map_matched,
+        proposes_new_directory: decision.proposes_new_directory,
+        confirmation_required: decision.confirmation_required,
+        confirmation_reasons: decision.confirmation_reasons.clone(),
+        new_directory_reason: decision.new_directory_reason.clone(),
+    }
+}
+
+fn decision_metadata_payload(metadata: &OrganizeDecisionMetadata) -> Value {
+    json!({
+        "targetArchiveDir": metadata.target_archive_dir.clone(),
+        "archiveMapMatched": metadata.archive_map_matched,
+        "proposesNewDirectory": metadata.proposes_new_directory,
+        "confirmationRequired": metadata.confirmation_required,
+        "confirmationReasons": metadata.confirmation_reasons.clone(),
+        "newDirectoryReason": metadata.new_directory_reason.clone()
+    })
 }
 
 fn conflict_recommendations(
@@ -518,7 +616,7 @@ mod tests {
             WorkerRunOptions {
                 max_items: Some(1),
                 stable_wait_ms: Some(0),
-                force_mock: Some(false),
+                force_mock: Some(true),
             },
         )
         .unwrap();
@@ -557,7 +655,7 @@ mod tests {
             WorkerRunOptions {
                 max_items: Some(1),
                 stable_wait_ms: Some(0),
-                force_mock: Some(true),
+                force_mock: Some(false),
             },
         )
         .unwrap();
@@ -591,7 +689,7 @@ mod tests {
             WorkerRunOptions {
                 max_items: Some(1),
                 stable_wait_ms: Some(0),
-                force_mock: Some(true),
+                force_mock: Some(false),
             },
         )
         .unwrap();
@@ -599,11 +697,23 @@ mod tests {
         assert_eq!(run.processed, 1);
         assert_eq!(run.failed, 1);
         assert!(temp.path().join(INBOX_DIR).join("a.md").exists());
+        let failed_items =
+            QueueService::list_by_status(temp.path().to_str().unwrap(), "failed").unwrap();
+        assert_eq!(failed_items.len(), 1);
+        let metadata = run.items[0].decision_metadata.as_ref().unwrap();
+        assert!(metadata.confirmation_required);
         assert_eq!(
-            QueueService::list_by_status(temp.path().to_str().unwrap(), "failed")
-                .unwrap()
-                .len(),
-            1
+            metadata.confirmation_reasons,
+            vec!["missing_key".to_string()]
+        );
+        assert_eq!(
+            failed_items[0]
+                .payload
+                .get("confirmationReasons")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("missing_key")
         );
     }
 }

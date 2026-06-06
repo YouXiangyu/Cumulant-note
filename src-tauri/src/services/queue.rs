@@ -297,14 +297,32 @@ impl QueueService {
         status: &str,
         error: Option<&str>,
     ) -> ServiceResult<QueueItem> {
+        Self::finish_with_payload(vault_path, id, status, error, None)
+    }
+
+    pub fn finish_with_payload(
+        vault_path: &str,
+        id: i64,
+        status: &str,
+        error: Option<&str>,
+        extra_payload: Option<Value>,
+    ) -> ServiceResult<QueueItem> {
         validate_nonempty("queue status", status)?;
         let connection = open_index_for_vault(vault_path)?;
         let mut item = get_queue_item(&connection, id)?;
         let now = Utc::now().to_rfc3339();
         let mut payload = item.payload;
+        if !payload.is_object() {
+            payload = Value::Object(Map::new());
+        }
         if let Some(error) = error {
             if let Some(object) = payload.as_object_mut() {
                 object.insert("lastError".to_string(), Value::String(error.to_string()));
+            }
+        }
+        if let Some(Value::Object(extra)) = extra_payload {
+            if let Some(object) = payload.as_object_mut() {
+                object.extend(extra);
             }
         }
         connection.execute(

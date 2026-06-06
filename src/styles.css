@@ -1320,6 +1320,7 @@ textarea:focus {
 }
 
 .conflict-recommendation-detail,
+.conflict-metadata-detail,
 .conflict-preview,
 .conflict-target-box {
   display: grid;
@@ -1519,6 +1520,12 @@ textarea:focus {
 .plan-detail p {
   color: var(--text);
   margin: 0;
+}
+
+.plan-detail small,
+.conflict-metadata-detail small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .template-tabs {
