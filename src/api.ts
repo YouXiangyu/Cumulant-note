@@ -764,6 +764,23 @@ export interface ConflictPreviewFile {
   relativePath?: string;
 }
 
+export type ConflictDiffLineKind = "context" | "removed" | "added" | "omitted" | string;
+
+export interface ConflictDiffLine {
+  kind: ConflictDiffLineKind;
+  sourceLine?: number;
+  targetLine?: number;
+  text: string;
+}
+
+export interface ConflictDiffPreview {
+  status: string;
+  sourceLineCount: number;
+  targetLineCount: number;
+  truncated: boolean;
+  lines: ConflictDiffLine[];
+}
+
 export interface ConflictPreview {
   sourceExists?: boolean;
   targetExists?: boolean;
@@ -774,6 +791,7 @@ export interface ConflictPreview {
   source?: ConflictPreviewFile;
   target?: ConflictPreviewFile;
   context?: string;
+  diff?: ConflictDiffPreview;
 }
 
 export interface ConflictRenameSuggestion {

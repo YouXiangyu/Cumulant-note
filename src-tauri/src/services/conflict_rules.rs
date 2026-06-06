@@ -13,6 +13,12 @@ use std::path::Path;
 
 pub const RULES_DIR: &str = ".thebrain/rules";
 pub const INBOX_RULES_FILE: &str = ".thebrain/rules/inbox-organizing-rules.md";
+const PREVIEW_TEXT_MAX_BYTES: u64 = 1_000_000;
+const PREVIEW_SNIPPET_CHARS: usize = 1200;
+const DIFF_MAX_INPUT_LINES: usize = 240;
+const DIFF_MAX_OUTPUT_LINES: usize = 120;
+const DIFF_CONTEXT_LINES: usize = 2;
+const DIFF_LINE_CHARS: usize = 240;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +64,27 @@ pub struct ConflictPreviewContext {
     pub target_exists: bool,
     pub source: Option<ConflictFilePreview>,
     pub target: Option<ConflictFilePreview>,
+    #[serde(default)]
+    pub diff: Option<ConflictDiffPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictDiffPreview {
+    pub status: String,
+    pub source_line_count: usize,
+    pub target_line_count: usize,
+    pub truncated: bool,
+    pub lines: Vec<ConflictDiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictDiffLine {
+    pub kind: String,
+    pub source_line: Option<usize>,
+    pub target_line: Option<usize>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -717,6 +744,7 @@ fn build_preview_context(
     let target_preview = target
         .map(|path| build_file_preview(vault_path, path))
         .transpose()?;
+    let diff = build_diff_preview(vault_path, source_preview.as_ref(), target_preview.as_ref())?;
     Ok(ConflictPreviewContext {
         source_relative_path: source_preview
             .as_ref()
@@ -734,6 +762,7 @@ fn build_preview_context(
             .unwrap_or(false),
         source: source_preview,
         target: target_preview,
+        diff,
     })
 }
 
@@ -764,10 +793,10 @@ fn build_file_preview(vault_path: &str, relative_path: &str) -> ServiceResult<Co
             snippet: None,
         });
     }
-    let snippet = if is_preview_text_path(&normalized) && metadata.len() <= 1_000_000 {
+    let snippet = if is_preview_text_path(&normalized) && metadata.len() <= PREVIEW_TEXT_MAX_BYTES {
         fs::read_to_string(&canonical)
             .ok()
-            .map(|body| body.chars().take(1200).collect())
+            .map(|body| body.chars().take(PREVIEW_SNIPPET_CHARS).collect())
     } else {
         None
     };
@@ -777,6 +806,225 @@ fn build_file_preview(vault_path: &str, relative_path: &str) -> ServiceResult<Co
         size_bytes: Some(metadata.len()),
         snippet,
     })
+}
+
+fn build_diff_preview(
+    vault_path: &str,
+    source: Option<&ConflictFilePreview>,
+    target: Option<&ConflictFilePreview>,
+) -> ServiceResult<Option<ConflictDiffPreview>> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    if !source.exists || !target.exists {
+        return Ok(Some(empty_diff_status("missing_file")));
+    }
+    if !is_preview_text_path(&source.relative_path) || !is_preview_text_path(&target.relative_path)
+    {
+        return Ok(Some(empty_diff_status("unsupported_file_type")));
+    }
+    if source.size_bytes.unwrap_or(0) > PREVIEW_TEXT_MAX_BYTES
+        || target.size_bytes.unwrap_or(0) > PREVIEW_TEXT_MAX_BYTES
+    {
+        return Ok(Some(empty_diff_status("too_large")));
+    }
+    let Some(source_text) = read_preview_text(vault_path, &source.relative_path)? else {
+        return Ok(Some(empty_diff_status("read_error")));
+    };
+    let Some(target_text) = read_preview_text(vault_path, &target.relative_path)? else {
+        return Ok(Some(empty_diff_status("read_error")));
+    };
+    Ok(Some(diff_text(&source_text, &target_text)))
+}
+
+fn empty_diff_status(status: &str) -> ConflictDiffPreview {
+    ConflictDiffPreview {
+        status: status.to_string(),
+        source_line_count: 0,
+        target_line_count: 0,
+        truncated: false,
+        lines: Vec::new(),
+    }
+}
+
+fn read_preview_text(vault_path: &str, relative_path: &str) -> ServiceResult<Option<String>> {
+    let root = canonical_vault_root(vault_path)?;
+    let normalized = normalize_relative_path(relative_path)?;
+    if !is_preview_text_path(&normalized) {
+        return Ok(None);
+    }
+    let path = root.join(&normalized);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(&root) {
+        return Err(ServiceError::EscapedVault(
+            canonical.to_string_lossy().to_string(),
+        ));
+    }
+    let metadata = fs::metadata(&canonical)?;
+    if !metadata.is_file() || metadata.len() > PREVIEW_TEXT_MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(fs::read_to_string(canonical).ok())
+}
+
+#[derive(Debug, Clone)]
+struct DiffOp {
+    kind: &'static str,
+    source_line: Option<usize>,
+    target_line: Option<usize>,
+    text: String,
+}
+
+fn diff_text(source_text: &str, target_text: &str) -> ConflictDiffPreview {
+    let source_line_count = source_text.lines().count();
+    let target_line_count = target_text.lines().count();
+    if source_text == target_text {
+        return ConflictDiffPreview {
+            status: "identical".to_string(),
+            source_line_count,
+            target_line_count,
+            truncated: false,
+            lines: Vec::new(),
+        };
+    }
+
+    let source_lines = source_text
+        .lines()
+        .take(DIFF_MAX_INPUT_LINES)
+        .collect::<Vec<_>>();
+    let target_lines = target_text
+        .lines()
+        .take(DIFF_MAX_INPUT_LINES)
+        .collect::<Vec<_>>();
+    let mut truncated =
+        source_line_count > DIFF_MAX_INPUT_LINES || target_line_count > DIFF_MAX_INPUT_LINES;
+    let ops = diff_ops(&source_lines, &target_lines);
+    let significant = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| (op.kind != "context").then_some(index))
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut skipped_context = false;
+    for (index, op) in ops.iter().enumerate() {
+        let include = op.kind != "context"
+            || significant
+                .iter()
+                .any(|changed| index.abs_diff(*changed) <= DIFF_CONTEXT_LINES);
+        if !include {
+            skipped_context = true;
+            continue;
+        }
+        if skipped_context && !lines.is_empty() {
+            lines.push(ConflictDiffLine {
+                kind: "omitted".to_string(),
+                source_line: None,
+                target_line: None,
+                text: "...".to_string(),
+            });
+        }
+        skipped_context = false;
+        lines.push(ConflictDiffLine {
+            kind: op.kind.to_string(),
+            source_line: op.source_line,
+            target_line: op.target_line,
+            text: bounded_diff_line(&op.text),
+        });
+        if lines.len() >= DIFF_MAX_OUTPUT_LINES {
+            truncated = true;
+            break;
+        }
+    }
+
+    ConflictDiffPreview {
+        status: "ok".to_string(),
+        source_line_count,
+        target_line_count,
+        truncated,
+        lines,
+    }
+}
+
+fn diff_ops(source: &[&str], target: &[&str]) -> Vec<DiffOp> {
+    let n = source.len();
+    let m = target.len();
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if source[i] == target[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut ops = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+    while i < n && j < m {
+        if source[i] == target[j] {
+            ops.push(DiffOp {
+                kind: "context",
+                source_line: Some(i + 1),
+                target_line: Some(j + 1),
+                text: source[i].to_string(),
+            });
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            ops.push(DiffOp {
+                kind: "removed",
+                source_line: Some(i + 1),
+                target_line: None,
+                text: source[i].to_string(),
+            });
+            i += 1;
+        } else {
+            ops.push(DiffOp {
+                kind: "added",
+                source_line: None,
+                target_line: Some(j + 1),
+                text: target[j].to_string(),
+            });
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(DiffOp {
+            kind: "removed",
+            source_line: Some(i + 1),
+            target_line: None,
+            text: source[i].to_string(),
+        });
+        i += 1;
+    }
+    while j < m {
+        ops.push(DiffOp {
+            kind: "added",
+            source_line: None,
+            target_line: Some(j + 1),
+            text: target[j].to_string(),
+        });
+        j += 1;
+    }
+    ops
+}
+
+fn bounded_diff_line(value: &str) -> String {
+    if value.chars().count() <= DIFF_LINE_CHARS {
+        value.to_string()
+    } else {
+        let mut output = value.chars().take(DIFF_LINE_CHARS).collect::<String>();
+        output.push_str("...");
+        output
+    }
 }
 
 fn suggest_rename_targets(
@@ -1151,7 +1399,7 @@ mod tests {
         assert!(preview.target_exists);
         assert_eq!(
             preview.source.unwrap().snippet.unwrap().chars().count(),
-            1200
+            PREVIEW_SNIPPET_CHARS
         );
         assert_eq!(
             preview.target.unwrap().snippet.unwrap(),
@@ -1161,6 +1409,51 @@ mod tests {
             detail.rename_suggestions[0].target_relative_path,
             "100-School/a-1.md"
         );
+    }
+
+    #[test]
+    fn conflict_detail_preview_includes_bounded_read_only_diff() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("100-School")).unwrap();
+        fs::write(
+            temp.path().join(INBOX_DIR).join("a.md"),
+            "same\nold line\nend\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("100-School").join("a.md"),
+            "same\nnew line\nend\n",
+        )
+        .unwrap();
+        let event = AuditService::record(
+            temp.path().to_str().unwrap(),
+            "conflict",
+            json!({
+                "sourceRelativePath": format!("{INBOX_DIR}/a.md"),
+                "targetRelativePath": "100-School/a.md",
+                "message": "target already exists"
+            }),
+        )
+        .unwrap();
+
+        let detail =
+            ConflictRuleService::get_conflict(temp.path().to_str().unwrap(), &event.id.to_string())
+                .unwrap();
+        let diff = detail.preview.unwrap().diff.unwrap();
+
+        assert_eq!(diff.status, "ok");
+        assert!(!diff.truncated);
+        assert_eq!(diff.source_line_count, 3);
+        assert_eq!(diff.target_line_count, 3);
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.kind == "removed" && line.text == "old line"));
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.kind == "added" && line.text == "new line"));
     }
 
     #[test]

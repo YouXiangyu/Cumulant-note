@@ -1412,6 +1412,67 @@ textarea:focus {
   white-space: normal;
 }
 
+.conflict-diff-preview {
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.conflict-diff-lines {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.conflict-preview .diff-line {
+  align-items: start;
+  background: #ffffff;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid rgba(61, 46, 31, 0.08);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 18px 62px minmax(0, 1fr);
+  margin: 0;
+  min-height: 26px;
+  padding: 5px 7px;
+  white-space: pre-wrap;
+}
+
+.conflict-preview .diff-line:last-child {
+  border-bottom: 0;
+}
+
+.diff-marker,
+.diff-line-number {
+  color: var(--muted);
+  user-select: none;
+}
+
+.diff-line-number {
+  font-size: 11px;
+}
+
+.diff-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conflict-preview .diff-added {
+  background: #edf8f0;
+}
+
+.conflict-preview .diff-removed {
+  background: #fff0ee;
+}
+
+.conflict-preview .diff-omitted {
+  background: #f5f1ea;
+  color: var(--muted);
+}
+
 .conflict-schedule-card {
   grid-template-columns: auto minmax(0, 1fr) auto auto auto;
 }

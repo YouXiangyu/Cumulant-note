@@ -75,6 +75,7 @@ import {
   BatchRollbackPreview,
   BudgetStatus,
   commands,
+  ConflictDiffLine,
   ConflictItem,
   ConflictResolutionAction,
   ConflictRule,
@@ -364,6 +365,32 @@ function safeConflictActions(conflict: ConflictItem): ConflictResolutionAction[]
   const fallbackOptions: ConflictResolutionAction[] = ["rename", "skip", "keep_existing"];
   const options = conflict.options?.length ? conflict.options : fallbackOptions;
   return options.filter((action) => action !== "overwrite");
+}
+
+function conflictDiffStatusLabel(status?: string): string {
+  const labels: Record<string, string> = {
+    identical: "文本内容相同",
+    missing_file: "文件缺失，无法生成 diff",
+    ok: "只读差异预览",
+    read_error: "读取失败，无法生成 diff",
+    too_large: "文件过大，已跳过 diff",
+    unsupported_file_type: "非文本文件，已跳过 diff",
+  };
+  return status ? labels[status] ?? status : "未生成 diff";
+}
+
+function diffLineMarker(kind: ConflictDiffLine["kind"]): string {
+  if (kind === "added") return "+";
+  if (kind === "removed") return "-";
+  if (kind === "omitted") return "...";
+  return " ";
+}
+
+function diffLineNumberLabel(line: ConflictDiffLine): string {
+  if (line.kind === "added") return `T${line.targetLine ?? ""}`;
+  if (line.kind === "removed") return `S${line.sourceLine ?? ""}`;
+  if (line.kind === "context") return `S${line.sourceLine ?? ""}/T${line.targetLine ?? ""}`;
+  return "";
 }
 
 function boundedSnippet(value?: string): string {
@@ -1638,6 +1665,7 @@ export default function App() {
     const sourceSnippet = boundedSnippet(preview?.sourceSnippet ?? preview?.source?.snippet);
     const targetSnippet = boundedSnippet(preview?.targetSnippet ?? preview?.target?.snippet);
     const context = boundedSnippet(preview?.context);
+    const diff = preview?.diff;
     const decisionMetadata = decisionMetadataFromPayload(conflict.payload);
     const metadataSummary = decisionMetadataSummary(decisionMetadata);
     const reasonLabels = decisionMetadata?.confirmationReasons.map(confirmationReasonLabel) ?? [];
@@ -1664,6 +1692,24 @@ export default function App() {
             {sourceSnippet ? <code>Source: {sourceSnippet}</code> : null}
             {targetSnippet ? <code>Target: {targetSnippet}</code> : null}
             {context ? <code>Context: {context}</code> : null}
+            {diff ? (
+              <div className="conflict-diff-preview" aria-label="Conflict read-only diff preview">
+                <small>
+                  Diff: {conflictDiffStatusLabel(diff.status)} / source {diff.sourceLineCount} lines / target {diff.targetLineCount} lines{diff.truncated ? " / truncated" : ""}
+                </small>
+                {diff.status === "ok" && diff.lines.length > 0 ? (
+                  <div className="conflict-diff-lines">
+                    {diff.lines.map((line, index) => (
+                      <code className={`diff-line diff-${line.kind}`} key={`${line.kind}-${line.sourceLine ?? "x"}-${line.targetLine ?? "x"}-${index}`}>
+                        <span className="diff-marker">{diffLineMarker(line.kind)}</span>
+                        <span className="diff-line-number">{diffLineNumberLabel(line)}</span>
+                        <span className="diff-text">{line.text}</span>
+                      </code>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </>

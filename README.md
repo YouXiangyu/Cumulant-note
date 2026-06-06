@@ -17,7 +17,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - Archive Map / 动态归档模板第一版：扫描正式 Vault 目录结构，完全排除 `000-收集箱/`、`.thebrain/`、`.secrets/` 和工具目录，生成 `.thebrain/rules/archive-map.md`，并把目录地图接入手动“生成计划”和 worker 共用的整理决策 prompt；当前还会在读取地图时做只读健康检查，展示缓存目录是否相对当前正式 Vault 目录失效、基于 movement log 的历史归档命中排行、本地启发式目录语义摘要、用户目录说明/锁定规则第一增量，以及整理决策的 Archive Map 命中、新目录建议和确认原因元数据。
 - 收集箱队列的第一层可信 worker：手动单轮消费 pending 队列、暂停/恢复、稳定等待、预算检查、MiMo 抽取与整理决策、非 mock 且可信时自动移动、失败/冲突写入内部状态；低置信度、目标冲突、收集箱内目标或新目录建议会写入结构化确认原因，供队列、audit 和冲突 UI 展示。
 - 应用内 resident worker 第一版：用户可在收集箱页手动启动/停止 5 秒 tick 的常驻消费循环；它复用 `WorkerService::drain`，单并发、每 tick 最多处理 1 条队列项，不是系统服务，也不会随应用启动自动运行。
-- 冲突问题与规则记忆第一版：前端可查看 open conflict、只读预览源/目标文件状态与文本片段、选择处理动作、使用只读重命名建议、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中、启用/禁用/编辑状态和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
+- 冲突问题与规则记忆第一版：前端可查看 open conflict、只读预览源/目标文件状态、文本片段和 bounded 只读 diff、选择处理动作、使用只读重命名建议、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中、启用/禁用/编辑状态和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
 - 收集箱整理状态面板与恢复动作第一版：集中展示 listener、queue、worker、resident worker、conflict、movement log 和 audit timeline 的状态、最近事件和最近错误；主操作区提供导入、递归扫描入队、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项恢复、批量恢复预览/确认、整理计划确认原因、audit 日期范围筛选/分页加载/详情展开、冲突规则处理、movement log 单项回滚和批量回滚预览/确认。
 - MiMo provider 路径、设置页 key 保存、BOM 污染检测、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、Trace、会话历史和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
@@ -61,7 +61,7 @@ AI 可以在用户指定的 Vault 范围内自动整理并移动 `000-收集箱/
 - embedding、AI prompt/response、token usage、移动历史、队列日志不写入 Markdown frontmatter，只进入 `.thebrain` 内部结构。
 - TODO、日程、联系人档案等行动项可以由 AI 生成候选；是否自动写入正式系统需要在后续 PRD 中按场景定义。
 
-当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、Archive Map 本地目录语义摘要第一增量、Archive Map 用户目录说明/锁定规则第一增量、整理决策确认元数据第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选/日期范围/分页/详情展开第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态，并在计划详情、队列 payload、audit payload 和冲突详情中保留结构化确认原因；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、真正的差异预览和更完整的自动冲突处理仍是后续目标。
+当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、Archive Map 本地目录语义摘要第一增量、Archive Map 用户目录说明/锁定规则第一增量、整理决策确认元数据第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选/日期范围/分页/详情展开第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态，并在计划详情、队列 payload、audit payload 和冲突详情中保留结构化确认原因；冲突详情当前已有 bounded 只读 diff 预览第一增量；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、更完整的 merge/diff 体验和更完整的自动冲突处理仍是后续目标。
 
 Archive Map 的设计边界是：只扫描正式 Vault 归档目录，完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为归档目标，也不提供归档分类结构；历史参考只能来自 `收集箱-已整理.md`、movement log 或 audit events 中的已完成移动记录。
 
@@ -117,7 +117,7 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 前端层：
 
 - `src/App.tsx`：桌面工作台 shell，包含 Vault、收集箱、Markdown、AI 整理、RAG 问答、TODO/日程、便利贴、个人页、项目页和设置页。
-- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段和目录规则保存、MiMo 状态、抽取、整理计划与确认原因元数据、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程、冲突详情/预览、冲突规则管理和 RAG 会话/问答命令。
+- `src/api.ts`：封装 Tauri commands，暴露受控导入、收集箱 listener、Archive Map 健康字段和目录规则保存、MiMo 状态、抽取、整理计划与确认原因元数据、worker、resident worker、queue 单项/批量恢复、批量恢复预览、移动、单项/批量回滚、批量回滚预览、audit timeline 搜索、Workspace Insights、正式 TODO/日程、冲突详情/预览/只读 diff、冲突规则管理和 RAG 会话/问答命令。
 - `src/styles.css`：视觉 token、左侧导航、页面网格、收集箱、RAG 面板、Markdown 三栏编辑器和便利贴布局。
 
 本地后端服务层：
@@ -130,13 +130,13 @@ TheBrain 不是传统远程前后端分离 Web 应用，而是 Tauri 桌面应�
 - `src-tauri/src/services/ai.rs`：MiMo 状态、文本本地抽取、音频/图片 MiMo 抽取、结构化整理 JSON 解析、Archive Map 命中/新目录/确认原因元数据派生和 fallback。
 - `src-tauri/src/services/worker.rs`：收集箱队列的第一层可信消费器，负责 claim pending item、稳定等待、预算检查、调用 MiMo、可信移动、失败/冲突/audit 记录和 drain；手动 worker 与 resident worker 都复用这一服务。
 - `src-tauri/src/services/movement.rs`：收集箱文件移动、移动后空目录清理、ledger、movement log、audit events 和回滚。
-- `src-tauri/src/services/conflict_rules.rs`：冲突问题详情、源/目标文件 bounded preview、只读重命名建议、用户答案规则写入、规则索引、启用/禁用/编辑、相似规则推荐和确认后应用。
+- `src-tauri/src/services/conflict_rules.rs`：冲突问题详情、源/目标文件 bounded preview、bounded 只读 diff 预览、只读重命名建议、用户答案规则写入、规则索引、启用/禁用/编辑、相似规则推荐和确认后应用。
 - `src-tauri/src/services/action_items.rs`：正式 TODO/日程第一增量，负责把候选幂等 promotion 为 `todo_items` / `schedule_items`，并维护完成/取消状态。
 - `src-tauri/src/services/workspace_insights.rs`：个人页和项目工作台的只读统计聚合，扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、正式行动项、movement、audit 和 sticky 计数。
 - `src-tauri/src/services/rag.rs`、`retrieval.rs`、`chunking.rs`、`rag_trace.rs`：本地 RAG 索引、范围检索、会话消息、分块、引用和 Trace。
 - `src-tauri/src/services/index.rs`：`.thebrain/index.sqlite` schema。
 
-MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；listener 只负责发现 `000-收集箱/` 中允许处理的普通文件并稳定去重入队，递归扫描和递归 watcher 会覆盖子目录，但会跳过 ledger、`.thebrain`、`.secrets`、隐藏/临时文件和不支持的文件类型；Archive Map 扫描正式 Vault 归档目录并生成 `.thebrain/rules/archive-map.md`，从正式目录内少量 md/txt 文件生成本地启发式目录摘要，目录规则保存到 SQLite 并镜像为 `.thebrain/rules/archive-map-rules.md`，整理计划和后台 worker 通过同一个整理决策入口读取这份地图、摘要与规则，并把 Archive Map 命中、新目录建议、是否需要确认和确认原因作为结构化元数据返回；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker 和手动启动/停止的应用内 resident worker：它们只处理 `000-收集箱/` 中的普通文件；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件，移动成功后会清理收集箱内变空的父目录。冲突规则第一版只做只读预览、推荐与用户确认应用，规则 Markdown 位于 `.thebrain/rules/`，不会被 listener 或 RAG 当作用户内容处理；规则编辑/禁用只更新 SQLite 和 audit，不重写历史 Markdown 规则条目。收集箱状态面板第一版会把 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 汇总到同一页面，并提供队列单项/批量重试、跳过以及 movement log 单项/批量回滚。resident worker 当前不是系统服务，不随应用启动自启；长时间实机稳定性、更完整批量策略和完整冲突恢复体验仍是后续目标。
+MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；listener 只负责发现 `000-收集箱/` 中允许处理的普通文件并稳定去重入队，递归扫描和递归 watcher 会覆盖子目录，但会跳过 ledger、`.thebrain`、`.secrets`、隐藏/临时文件和不支持的文件类型；Archive Map 扫描正式 Vault 归档目录并生成 `.thebrain/rules/archive-map.md`，从正式目录内少量 md/txt 文件生成本地启发式目录摘要，目录规则保存到 SQLite 并镜像为 `.thebrain/rules/archive-map-rules.md`，整理计划和后台 worker 通过同一个整理决策入口读取这份地图、摘要与规则，并把 Archive Map 命中、新目录建议、是否需要确认和确认原因作为结构化元数据返回；后台 worker 是本地调度器，负责从队列取任务、稳定等待、预算检查、调用 MiMo、执行移动、写日志、重试和回滚。当前已接入第一层手动 drain worker 和手动启动/停止的应用内 resident worker：它们只处理 `000-收集箱/` 中的普通文件；只有抽取和整理决策均为 `ok` 且 `is_mock=false` 时才会移动文件，移动成功后会清理收集箱内变空的父目录。冲突规则第一版只做只读预览、bounded 只读 diff、推荐与用户确认应用，规则 Markdown 位于 `.thebrain/rules/`，不会被 listener 或 RAG 当作用户内容处理；规则编辑/禁用只更新 SQLite 和 audit，不重写历史 Markdown 规则条目。收集箱状态面板第一版会把 listener、queue、worker、resident worker、conflict、Archive Map、movement log 和 audit timeline 汇总到同一页面，并提供队列单项/批量重试、跳过以及 movement log 单项/批量回滚。resident worker 当前不是系统服务，不随应用启动自启；长时间实机稳定性、更完整批量策略和完整冲突恢复体验仍是后续目标。
 
 ## 使用方式
 
@@ -170,7 +170,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - TODO/日程候选创建、确认、忽略。
 - TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项。
 - 预算暂停/耗尽状态和 `ai_usage` 用量占位记录。
-- 冲突事件列表、详情、bounded preview、只读重命名建议、解决记录、用户答案写入规则、相似规则推荐和确认应用命令。
+- 冲突事件列表、详情、bounded preview、bounded 只读 diff 预览、只读重命名建议、解决记录、用户答案写入规则、相似规则推荐和确认应用命令。
 - 冲突规则 Markdown 文件 `.thebrain/rules/inbox-organizing-rules.md` 与 SQLite 规则索引/命中记录；SQLite 规则支持启用/禁用和字段编辑，Markdown 规则文件保持 append-only。
 - 设置页展示 MiMo key 状态，只显示 key 来源和脱敏状态；支持保存 key 到 Vault `.secrets/mimo_api_key.txt`，并检测/清理 UTF-8 BOM 污染。
 - 全局快捷键插件依赖和注册命令已接入。
@@ -185,7 +185,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - resident worker 增强：当前第一版只是用户手动启动/停止的应用内循环；后续仍需系统级后台服务或托盘生命周期策略、应用启动自启策略、长时间实机监听稳定性、批量处理策略和更完整的自动整理策略。
 - 真实 MiMo API 的长时间、多文件类型、带成本实机联调。
 - MiMo 返回 token/cost 的真实精确统计。
-- 完整冲突解决 UI 增强：当前已有只读重命名建议、bounded preview、动作选择、规则启用/禁用/编辑第一版；后续仍需真正的 diff 视图、批量冲突处理、强确认的覆盖/重命名执行流和更细的恢复体验。
+- 完整冲突解决 UI 增强：当前已有只读重命名建议、bounded preview、bounded 只读 diff 预览、动作选择、规则启用/禁用/编辑第一版；后续仍需更完整的 side-by-side/merge diff 体验、批量冲突处理、强确认的覆盖/重命名执行流和更细的恢复体验。
 - 更完整的状态面板和恢复体验：当前已有 audit 搜索/类型筛选/日期范围/分页/详情展开、队列批量恢复预览/确认和 movement 批量回滚预览/确认第一版；后续仍需长期审计分析、批量恢复差异预览、冲突恢复策略和更细粒度确认。
 - 真实 embedding、向量检索、重排模型、跨会话长期记忆策略和复杂个人统计。
 - RAG 会话增强：会话重命名、删除、历史搜索、引用筛选和更完整的跨会话长期记忆策略。
@@ -214,4 +214,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview 和 bounded 只读 diff、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。
