@@ -182,6 +182,9 @@ export interface ArchiveMapDirectory {
   childCount: number;
   sampleFiles: string[];
   keywordHints: string[];
+  headingHints: string[];
+  contentHints: string[];
+  semanticSummary: string;
   historicalMoves: number;
   rule?: ArchiveMapDirectoryRule;
 }

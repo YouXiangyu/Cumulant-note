@@ -2562,6 +2562,10 @@ kbd {
   color: var(--muted);
 }
 
+.archive-map-semantic-summary {
+  color: var(--text);
+}
+
 @media (max-width: 1360px) {
   .concept-grid.three,
   .settings-grid,

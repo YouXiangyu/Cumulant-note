@@ -3073,9 +3073,19 @@ export default function App() {
                       <div className="archive-map-directory-row">
                         <div>
                           <span>{directory.relativePath}</span>
+                          {directory.semanticSummary ? (
+                            <small className="archive-map-semantic-summary">
+                              {directory.semanticSummary}
+                            </small>
+                          ) : null}
                           <small>
                             {directory.fileCount} files · 历史引用 {hitStat?.moveCount ?? directory.historicalMoves} · {directory.keywordHints.slice(0, 3).join(" / ") || "no hints"}
                           </small>
+                          {(directory.headingHints ?? []).length > 0 ? (
+                            <small>
+                              标题 {(directory.headingHints ?? []).slice(0, 2).join(" / ")}
+                            </small>
+                          ) : null}
                         </div>
                         <button
                           type="button"

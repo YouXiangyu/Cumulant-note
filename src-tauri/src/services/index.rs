@@ -26,7 +26,7 @@ impl IndexService {
         Self::migrate(&connection)?;
         connection.execute(
             "INSERT INTO vault_meta (key, value, updated_at)
-            VALUES ('schema_version', '8', ?1)
+            VALUES ('schema_version', '9', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -38,7 +38,7 @@ impl IndexService {
     pub fn migrate(connection: &Connection) -> ServiceResult<()> {
         connection.execute_batch(
             "
-            PRAGMA user_version = 8;
+            PRAGMA user_version = 9;
 
             CREATE TABLE IF NOT EXISTS vault_meta (
                 key TEXT PRIMARY KEY,
@@ -209,6 +209,9 @@ impl IndexService {
                 child_count INTEGER NOT NULL DEFAULT 0,
                 sample_files_json TEXT NOT NULL DEFAULT '[]',
                 keyword_hints_json TEXT NOT NULL DEFAULT '[]',
+                heading_hints_json TEXT NOT NULL DEFAULT '[]',
+                content_hints_json TEXT NOT NULL DEFAULT '[]',
+                semantic_summary TEXT NOT NULL DEFAULT '',
                 historical_moves INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES archive_map_runs(id) ON DELETE CASCADE
@@ -425,6 +428,25 @@ impl IndexService {
             "last_enqueued_count",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(
+            connection,
+            "archive_map_entries",
+            "heading_hints_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            connection,
+            "archive_map_entries",
+            "content_hints_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            connection,
+            "archive_map_entries",
+            "semantic_summary",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+
         Ok(())
     }
 }
@@ -471,6 +493,10 @@ mod tests {
         assert!(Path::new(&result.path).exists());
 
         let connection = Connection::open(result.path).unwrap();
+        let schema_version = connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(schema_version, 9);
         let table_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
@@ -507,5 +533,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 27);
+
+        let archive_columns = connection
+            .prepare("PRAGMA table_info(archive_map_entries)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(archive_columns.contains(&"heading_hints_json".to_string()));
+        assert!(archive_columns.contains(&"content_hints_json".to_string()));
+        assert!(archive_columns.contains(&"semantic_summary".to_string()));
     }
 }

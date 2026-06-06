@@ -10,10 +10,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const ARCHIVE_MAP_RELATIVE_PATH: &str = ".thebrain/rules/archive-map.md";
 pub const ARCHIVE_MAP_RULES_RELATIVE_PATH: &str = ".thebrain/rules/archive-map-rules.md";
+const MAX_SEMANTIC_FILES_PER_DIRECTORY: usize = 5;
+const MAX_SEMANTIC_BYTES_PER_FILE: u64 = 8192;
+const MAX_HEADING_HINTS_PER_DIRECTORY: usize = 6;
+const MAX_CONTENT_HINTS_PER_DIRECTORY: usize = 8;
+const MAX_SEMANTIC_SUMMARY_CHARS: usize = 240;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +30,9 @@ pub struct ArchiveMapDirectory {
     pub child_count: usize,
     pub sample_files: Vec<String>,
     pub keyword_hints: Vec<String>,
+    pub heading_hints: Vec<String>,
+    pub content_hints: Vec<String>,
+    pub semantic_summary: String,
     pub historical_moves: usize,
     pub rule: Option<ArchiveMapDirectoryRule>,
 }
@@ -330,8 +339,9 @@ fn rebuild_inner(
         transaction.execute(
             "INSERT INTO archive_map_entries
                 (run_id, relative_path, depth, file_count, child_count,
-                 sample_files_json, keyword_hints_json, historical_moves, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active')",
+                 sample_files_json, keyword_hints_json, heading_hints_json,
+                 content_hints_json, semantic_summary, historical_moves, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active')",
             params![
                 run_id,
                 directory.relative_path,
@@ -340,6 +350,9 @@ fn rebuild_inner(
                 directory.child_count as i64,
                 serde_json::to_string(&directory.sample_files)?,
                 serde_json::to_string(&directory.keyword_hints)?,
+                serde_json::to_string(&directory.heading_hints)?,
+                serde_json::to_string(&directory.content_hints)?,
+                directory.semantic_summary,
                 directory.historical_moves as i64
             ],
         )?;
@@ -356,7 +369,8 @@ fn snapshot_by_run_id(
     let run = run_by_id(connection, run_id)?;
     let mut statement = connection.prepare(
         "SELECT relative_path, depth, file_count, child_count, sample_files_json,
-                keyword_hints_json, historical_moves
+                keyword_hints_json, historical_moves, heading_hints_json,
+                content_hints_json, semantic_summary
          FROM archive_map_entries
          WHERE run_id = ?1 AND status = 'active'
          ORDER BY relative_path",
@@ -441,15 +455,14 @@ fn analyze_snapshot(
 
     for (relative_path, cached) in &cached_map {
         match current_map.get(relative_path) {
-            Some(current)
-                if cached.file_count != current.file_count
-                    || cached.child_count != current.child_count =>
-            {
+            Some(current) if directory_changed(cached, current) => {
                 changed_directories.push(relative_path.clone());
                 reported.insert(relative_path.clone());
                 stale_directories.push(ArchiveMapStaleDirectory {
                     relative_path: relative_path.clone(),
-                    reason: "directory file or child count changed since last rebuild".to_string(),
+                    reason:
+                        "directory file, child, or semantic summary details changed since last rebuild"
+                            .to_string(),
                     cached_file_count: Some(cached.file_count),
                     current_file_count: Some(current.file_count),
                     historical_moves: cached.historical_moves,
@@ -522,7 +535,7 @@ fn analyze_snapshot(
     }
     if !changed_directories.is_empty() {
         stale_reasons.push(format!(
-            "{} cached directories changed file or child counts",
+            "{} cached directories changed file, child, or semantic summary details",
             changed_directories.len()
         ));
     }
@@ -644,6 +657,15 @@ fn age_seconds(generated_at: &str) -> Option<i64> {
                 .num_seconds()
                 .max(0)
         })
+}
+
+fn directory_changed(cached: &ArchiveMapDirectory, current: &ArchiveMapDirectory) -> bool {
+    cached.file_count != current.file_count
+        || cached.child_count != current.child_count
+        || cached.keyword_hints != current.keyword_hints
+        || cached.heading_hints != current.heading_hints
+        || cached.content_hints != current.content_hints
+        || cached.semantic_summary != current.semantic_summary
 }
 
 fn current_directory_paths(root: &Path) -> ServiceResult<BTreeSet<String>> {
@@ -796,6 +818,8 @@ fn run_by_id(connection: &Connection, run_id: i64) -> ServiceResult<ArchiveMapRu
 fn row_to_directory(row: &Row<'_>) -> rusqlite::Result<ArchiveMapDirectory> {
     let sample_files_json: String = row.get(4)?;
     let keyword_hints_json: String = row.get(5)?;
+    let heading_hints_json: String = row.get(7)?;
+    let content_hints_json: String = row.get(8)?;
     Ok(ArchiveMapDirectory {
         relative_path: row.get(0)?,
         depth: row.get::<_, i64>(1)? as usize,
@@ -804,6 +828,9 @@ fn row_to_directory(row: &Row<'_>) -> rusqlite::Result<ArchiveMapDirectory> {
         sample_files: serde_json::from_str(&sample_files_json).unwrap_or_default(),
         keyword_hints: serde_json::from_str(&keyword_hints_json).unwrap_or_default(),
         historical_moves: row.get::<_, i64>(6)? as usize,
+        heading_hints: serde_json::from_str(&heading_hints_json).unwrap_or_default(),
+        content_hints: serde_json::from_str(&content_hints_json).unwrap_or_default(),
+        semantic_summary: row.get(9)?,
         rule: None,
     })
 }
@@ -822,6 +849,9 @@ fn scan_dir(
 ) -> ServiceResult<()> {
     let mut child_dirs = Vec::new();
     let mut sample_files = Vec::new();
+    let mut semantic_file_count = 0usize;
+    let mut heading_hints = Vec::new();
+    let mut content_hint_counts = BTreeMap::<String, usize>::new();
     let mut file_count = 0usize;
 
     for entry in sorted_entries(directory)? {
@@ -846,11 +876,25 @@ fn scan_dir(
             if sample_files.len() < 5 {
                 sample_files.push(name);
             }
+            if semantic_file_count < MAX_SEMANTIC_FILES_PER_DIRECTORY
+                && is_semantic_source_file(&entry)
+            {
+                semantic_file_count += 1;
+                collect_file_semantics(&entry, &mut heading_hints, &mut content_hint_counts);
+            }
         }
     }
 
     if directory != root {
         let relative = relative_path(root, directory)?;
+        let content_hints = ranked_content_hints(content_hint_counts);
+        let semantic_summary = semantic_summary(
+            &relative,
+            child_dirs.len(),
+            &sample_files,
+            &heading_hints,
+            &content_hints,
+        );
         directories.push(ArchiveMapDirectory {
             depth: relative.split('/').filter(|part| !part.is_empty()).count(),
             keyword_hints: keyword_hints(&relative, &sample_files),
@@ -858,6 +902,9 @@ fn scan_dir(
             file_count,
             child_count: child_dirs.len(),
             sample_files,
+            heading_hints,
+            content_hints,
+            semantic_summary,
             historical_moves: 0,
             rule: None,
         });
@@ -930,21 +977,25 @@ fn build_markdown(
         "- Historical archive references: `{history_count}`\n\n"
     ));
     markdown.push_str("## Available Archive Directories\n\n");
-    markdown.push_str("| Directory | Files | Children | Hints | Examples | History |\n");
-    markdown.push_str("| --- | ---: | ---: | --- | --- | ---: |\n");
+    markdown.push_str(
+        "| Directory | Files | Children | Summary | Hints | Headings | Examples | History |\n",
+    );
+    markdown.push_str("| --- | ---: | ---: | --- | --- | --- | --- | ---: |\n");
     for directory in directories {
         markdown.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
             escape_cell(&directory.relative_path),
             directory.file_count,
             directory.child_count,
+            escape_cell(&directory.semantic_summary),
             list_cell(&directory.keyword_hints),
+            list_cell(&directory.heading_hints),
             list_cell(&directory.sample_files),
             directory.historical_moves
         ));
     }
     if directories.is_empty() {
-        markdown.push_str("| _No formal archive directories yet_ | 0 | 0 |  |  | 0 |\n");
+        markdown.push_str("| _No formal archive directories yet_ | 0 | 0 |  |  |  |  | 0 |\n");
     }
 
     markdown.push_str("\n## Historical Targets\n\n");
@@ -1065,6 +1116,144 @@ fn is_temporary_or_hidden_name(name: &str) -> bool {
         || lower.ends_with(".swp")
 }
 
+fn is_semantic_source_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "txt"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn collect_file_semantics(
+    path: &Path,
+    heading_hints: &mut Vec<String>,
+    content_hint_counts: &mut BTreeMap<String, usize>,
+) {
+    let Some(text) = read_text_prefix(path) else {
+        return;
+    };
+    let mut in_frontmatter = false;
+    let mut frontmatter_checked = false;
+    let mut in_code_fence = false;
+
+    for raw_line in text.lines().take(120) {
+        let line = raw_line.trim();
+        if !frontmatter_checked {
+            frontmatter_checked = true;
+            if line == "---" {
+                in_frontmatter = true;
+                continue;
+            }
+        } else if in_frontmatter {
+            if line == "---" {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+
+        if line.starts_with("```") || line.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence || line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('#') {
+            let heading = clean_heading(line);
+            if !heading.is_empty() {
+                push_unique_limited(heading_hints, heading, MAX_HEADING_HINTS_PER_DIRECTORY);
+            }
+            continue;
+        }
+        collect_weighted_hint_parts(line, content_hint_counts);
+    }
+}
+
+fn read_text_prefix(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SEMANTIC_BYTES_PER_FILE)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn clean_heading(line: &str) -> String {
+    let cleaned = line
+        .trim_start_matches('#')
+        .trim()
+        .trim_matches(|character: char| matches!(character, '#' | '-' | '*' | '`'))
+        .trim();
+    truncate_chars(cleaned, 80)
+}
+
+fn push_unique_limited(values: &mut Vec<String>, value: String, limit: usize) {
+    if values.len() >= limit || values.iter().any(|current| current == &value) {
+        return;
+    }
+    values.push(value);
+}
+
+fn ranked_content_hints(hint_counts: BTreeMap<String, usize>) -> Vec<String> {
+    let mut hints = hint_counts.into_iter().collect::<Vec<_>>();
+    hints.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    hints
+        .into_iter()
+        .map(|(hint, _)| hint)
+        .take(MAX_CONTENT_HINTS_PER_DIRECTORY)
+        .collect()
+}
+
+fn semantic_summary(
+    relative_path: &str,
+    child_count: usize,
+    sample_files: &[String],
+    heading_hints: &[String],
+    content_hints: &[String],
+) -> String {
+    let summary = if !heading_hints.is_empty() {
+        format!(
+            "Headings: {}",
+            heading_hints
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if !content_hints.is_empty() {
+        format!(
+            "Likely topics: {}",
+            content_hints
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if !sample_files.is_empty() {
+        format!(
+            "Sample files: {}",
+            sample_files
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if child_count > 0 {
+        "Parent archive directory; child folders carry the detailed topics.".to_string()
+    } else {
+        format!("Archive target for {}.", relative_path)
+    };
+    truncate_chars(&summary, MAX_SEMANTIC_SUMMARY_CHARS)
+}
+
 fn keyword_hints(relative_path: &str, sample_files: &[String]) -> Vec<String> {
     let mut hints = BTreeSet::new();
     for value in relative_path.split('/') {
@@ -1081,16 +1270,71 @@ fn keyword_hints(relative_path: &str, sample_files: &[String]) -> Vec<String> {
 }
 
 fn collect_hint_parts(value: &str, hints: &mut BTreeSet<String>) {
-    for part in value.split(['-', '_', ' ', '.', '／', '/']) {
-        let cleaned = part
-            .trim_matches(|character: char| {
-                character.is_ascii_digit()
-                    || matches!(character, '-' | '_' | ' ' | '.' | '(' | ')' | '[' | ']')
-            })
-            .trim();
-        if cleaned.chars().count() >= 2 {
-            hints.insert(cleaned.to_string());
-        }
+    for cleaned in hint_parts(value) {
+        hints.insert(cleaned);
+    }
+}
+
+fn collect_weighted_hint_parts(value: &str, hints: &mut BTreeMap<String, usize>) {
+    for cleaned in hint_parts(value) {
+        *hints.entry(cleaned).or_insert(0) += 1;
+    }
+}
+
+fn hint_parts(value: &str) -> Vec<String> {
+    value
+        .split([
+            '-', '_', ' ', '.', '／', '/', '：', ':', '，', ',', '、', ';', '；', '(', ')', '[',
+            ']', '（', '）', '《', '》', '"', '\'', '`',
+        ])
+        .filter_map(|part| {
+            let cleaned = part
+                .trim_matches(|character: char| {
+                    character.is_ascii_digit()
+                        || matches!(
+                            character,
+                            '-' | '_' | ' ' | '.' | '(' | ')' | '[' | ']' | '#' | '*' | '>'
+                        )
+                })
+                .trim();
+            let length = cleaned.chars().count();
+            if (2..=32).contains(&length) && !is_common_hint_word(cleaned) {
+                Some(cleaned.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_common_hint_word(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "the"
+            | "and"
+            | "with"
+            | "that"
+            | "this"
+            | "from"
+            | "into"
+            | "notes"
+            | "note"
+            | "todo"
+            | "draft"
+            | "about"
+    )
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        let mut truncated = value
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('…');
+        truncated
     }
 }
 
@@ -1161,6 +1405,69 @@ mod tests {
         assert!(!paths.iter().any(|path| path.starts_with("dist")));
         assert!(temp.path().join(ARCHIVE_MAP_RELATIVE_PATH).is_file());
         assert!(snapshot.markdown.contains("100-School/AI"));
+    }
+
+    #[test]
+    fn archive_map_builds_semantic_summary_from_formal_markdown_and_text_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_str().unwrap();
+        VaultService::init(vault_path).unwrap();
+        fs::create_dir_all(temp.path().join("100-School").join("AI")).unwrap();
+        fs::create_dir_all(temp.path().join(INBOX_DIR).join("Nested")).unwrap();
+        fs::create_dir_all(temp.path().join(INTERNAL_DIR).join("rules")).unwrap();
+        fs::write(
+            temp.path().join("100-School").join("AI").join("lecture.md"),
+            "---\ntitle: hidden\n---\n# Transformer Attention\n\nGradient descent attention matrix lecture notes.",
+        )
+        .unwrap();
+        fs::write(
+            temp.path()
+                .join("100-School")
+                .join("AI")
+                .join("summary.txt"),
+            "Exam review backpropagation optimizer neural network",
+        )
+        .unwrap();
+        fs::write(
+            temp.path()
+                .join("100-School")
+                .join("AI")
+                .join("diagram.png"),
+            "PNG bytes should not be semantic content",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(INBOX_DIR).join("Nested").join("bait.md"),
+            "# InboxShouldNotAppear\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(INTERNAL_DIR).join("rules").join("bait.md"),
+            "# InternalShouldNotAppear\n",
+        )
+        .unwrap();
+
+        let snapshot = ArchiveMapService::rebuild(vault_path).unwrap();
+        let ai_dir = snapshot
+            .directories
+            .iter()
+            .find(|directory| directory.relative_path == "100-School/AI")
+            .unwrap();
+
+        assert!(ai_dir
+            .heading_hints
+            .contains(&"Transformer Attention".to_string()));
+        assert!(ai_dir.semantic_summary.contains("Transformer Attention"));
+        assert!(ai_dir.content_hints.iter().any(|hint| hint == "Gradient"));
+        assert!(!snapshot.markdown.contains("InboxShouldNotAppear"));
+        assert!(!snapshot.markdown.contains("InternalShouldNotAppear"));
+        assert!(!snapshot
+            .markdown
+            .contains("PNG bytes should not be semantic content"));
+        assert!(snapshot.markdown.contains("Transformer Attention"));
+
+        let context = ArchiveMapService::markdown_context(vault_path).unwrap();
+        assert!(context.contains("Transformer Attention"));
     }
 
     #[test]
