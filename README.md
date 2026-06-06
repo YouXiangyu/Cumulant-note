@@ -22,7 +22,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - MiMo provider 路径、设置页 key 保存、BOM 污染检测、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、引用筛选、Trace、会话历史、会话重命名/删除/搜索和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
 - 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页已接入 Workspace Insights 第一版真实统计和正式 TODO/日程第一增量，学习曲线、项目级 Agent 历史、提醒通知和联系人档案仍是占位或后续目标。
-- TODO/日程正式行动系统第一增量：`action_candidates` 可 promotion 为 SQLite 内部的 `todo_items` / `schedule_items`，支持幂等创建、列表展示、完成和取消状态更新；当前不提供提醒通知、重复日程、Markdown 双写、人名档案或联系人关系。
+- TODO/日程正式行动系统第一增量：`action_candidates` 可 promotion 为 SQLite 内部的 `todo_items` / `schedule_items`，支持幂等创建、列表展示、标题/来源/备注搜索、类型/状态过滤、来源 Markdown 打开、完成和取消状态更新；当前不提供提醒通知、重复日程、Markdown 双写、人名档案或联系人关系。
 
 当前阶段不是完整个人 Agent、真实向量数据库系统或完整多格式解析系统。当前 RAG 使用关键词通道和 local semantic placeholder 通道，不声明已经具备真实 embedding 或重排能力。PDF、DOCX、PPTX、URL 的真实解析仍是后续目标。
 
@@ -168,7 +168,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - movement log 列表命令 `list_move_logs`、单项回滚命令 `rollback_move`、批量回滚命令 `rollback_moves` 和只读预览命令 `preview_rollback_moves`，不覆盖已有文件；前端批量回滚会先展示当前文件/恢复目标/阻塞原因，再由用户确认执行。
 - audit timeline 命令 `list_audit_events` 和 `search_audit_events`，支持读取最近 audit events，按类型、文本、路径、状态、时间范围和 cursor 搜索；收集箱页面已接入类型/文本/日期范围筛选、分页加载和 bounded payload 详情展开。
 - TODO/日程候选创建、确认、忽略。
-- TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项。
+- TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项；前端已提供正式行动项搜索、类型/状态过滤、Markdown 来源打开和项目页边界感知路径匹配。
 - 预算暂停/耗尽状态和 `ai_usage` 用量占位记录。
 - 冲突事件列表、详情、bounded preview、bounded 只读 diff 预览、只读重命名建议、解决记录、用户答案写入规则、相似规则推荐和确认应用命令。
 - 冲突规则 Markdown 文件 `.thebrain/rules/inbox-organizing-rules.md` 与 SQLite 规则索引/命中记录；SQLite 规则支持启用/禁用和字段编辑，Markdown 规则文件保持 append-only。
@@ -191,9 +191,9 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - RAG 会话增强：当前已有会话重命名、删除、按标题/消息搜索历史和当前回答引用筛选第一增量；后续仍需引用排序/固定、删除恢复/归档策略和更完整的跨会话长期记忆策略。
 - PDF、DOCX、PPTX、URL 的真实解析。
 - 人名档案、联系人信息、会议纪要、通话记录和个人关系管理数据模型。
-- TODO/日程完整工作流增强：当前只有 SQLite 内部正式项第一增量；后续仍需提醒通知、重复日程、优先级、项目/文件引用定位、Markdown/YAML 双写或重建策略、批量确认、搜索过滤和更完整编辑体验。
+- TODO/日程完整工作流增强：当前已有 SQLite 内部正式项、前端搜索/过滤和 Markdown 来源定位第一增量；后续仍需提醒通知、重复日程、优先级、Markdown/YAML 双写或重建策略、批量确认、后端分页/全文搜索、非 Markdown 来源定位和更完整编辑体验。
 - 便利贴独立多窗口池、窗口回收和更完整的托盘体验。
-- 个人页和项目工作台增强：当前已有 Workspace Insights 第一版真实统计和正式行动项第一增量；后续仍需项目级 Agent 历史、学习曲线、联系人档案、项目级任务筛选增强和更复杂统计接入真实数据。
+- 个人页和项目工作台增强：当前已有 Workspace Insights 第一版真实统计和正式行动项第一增量；后续仍需项目级 Agent 历史、学习曲线、联系人档案、项目级任务编辑增强和更复杂统计接入真实数据。
 - `src/App.tsx` 页面与状态继续拆分，把个人页、项目页、RAG、收集箱、便利贴等不相关模块拆成更清晰的组件和服务边界。
 - 端到端 GUI 自动化测试和真实 Windows 实机长时间验证。
 

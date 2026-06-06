@@ -168,6 +168,7 @@ TheBrain 正在建立从内容到行动和档案的模型：
 - `schedule_items` 保存正式日程，包含来源候选、来源文件、标题、备注、开始/结束时间、全天、时区、地点、原始 payload、状态和完成/取消时间。
 - `promote_todo_schedule_candidate` 对同一候选幂等创建正式项，并把候选标记为 confirmed；被 rejected 的候选不能 promotion。
 - `list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 提供第一层列表、完成和取消能力。
+- 前端当前在仪表盘提供正式行动项标题/来源/备注搜索、TODO/日程类型过滤、active/all/completed/cancelled/archived 状态过滤和 Markdown 来源打开；项目页行动列表采用边界感知的 Vault 相对路径前缀匹配，避免 `Project` 误匹配 `ProjectX`。
 - 正式行动项当前是 `.thebrain/index.sqlite` 内部状态；不会写入 Markdown frontmatter，也不代表已经有提醒通知、重复日程、跨设备同步或完整 TickTick 式任务系统。
 
 关键决策尚未完成：
@@ -189,7 +190,7 @@ TheBrain 正在建立从内容到行动和档案的模型：
 
 后端逐步补齐真实能力。前端不应把未实现后端能力伪装成真实成功。
 
-个人页和项目工作台已接入 Workspace Insights 第一版：后端通过 `get_workspace_insights` 只读扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、正式行动项、movement、audit 和 sticky 计数；前端优先使用这些真实统计。学习曲线、项目级 Agent 历史、联系人档案、提醒通知和复杂长期统计仍按后续能力处理，不能描述为已完成。
+个人页和项目工作台已接入 Workspace Insights 第一版：后端通过 `get_workspace_insights` 只读扫描正式 Vault 文件、项目目录和最近文件，并从 SQLite 聚合 RAG、候选、正式行动项、movement、audit 和 sticky 计数；前端优先使用这些真实统计，并已提供正式行动项来源定位第一增量。学习曲线、项目级 Agent 历史、联系人档案、提醒通知和复杂长期统计仍按后续能力处理，不能描述为已完成。
 
 ## 8. 当前主要服务
 

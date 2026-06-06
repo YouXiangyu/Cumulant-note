@@ -119,6 +119,8 @@ type ViewId = "dashboard" | "inbox" | "markdown" | "notes" | "personal" | "proje
 type ImportBehavior = "copy" | "move";
 type RagScopeKind = RagScope["kind"];
 type RagCitationChannelFilter = "all" | string;
+type ActionKindFilter = "all" | "todo" | "schedule";
+type ActionStatusFilter = "active" | "all" | "completed" | "cancelled" | "archived";
 type BatchRecoveryPreviewState =
   | { kind: "queue-retry" | "queue-skip"; preview: BatchQueueRecoveryPreview }
   | { kind: "rollback"; preview: BatchRollbackPreview };
@@ -242,6 +244,45 @@ function actionDateLabel(item: TodoScheduleItem): string {
   const value = item.startsAt ?? item.dueAt;
   if (!value) return item.kind === "schedule" ? "未定时间" : "无截止";
   return formatDate(value);
+}
+
+function actionStatusLabel(status: string): string {
+  if (status === "open") return "进行中";
+  if (status === "scheduled") return "已排期";
+  if (status === "completed") return "已完成";
+  if (status === "cancelled") return "已取消";
+  if (status === "archived") return "已归档";
+  return status || "未知";
+}
+
+function actionItemMatchesStatus(item: TodoScheduleItem, filter: ActionStatusFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "active") return isActiveActionItem(item);
+  return item.status === filter;
+}
+
+function actionItemMatchesQuery(item: TodoScheduleItem, query: string): boolean {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return true;
+  return [
+    item.title,
+    item.notes,
+    item.sourceRelativePath,
+    item.kind,
+    item.status,
+    actionKindLabel(item),
+    actionStatusLabel(item.status),
+    actionDateLabel(item),
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLocaleLowerCase().includes(normalizedQuery));
+}
+
+function relativePathBelongsToPrefix(relativePath?: string, prefix?: string): boolean {
+  const normalizedPath = (relativePath ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const normalizedPrefix = (prefix ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!normalizedPath || !normalizedPrefix) return false;
+  return normalizedPath === normalizedPrefix || normalizedPath.startsWith(`${normalizedPrefix}/`);
 }
 
 function conversationTitle(conversation: RagConversation): string {
@@ -528,6 +569,9 @@ export default function App() {
   const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
   const [todoScheduleItems, setTodoScheduleItems] = useState<TodoScheduleItem[]>([]);
+  const [actionSearchText, setActionSearchText] = useState("");
+  const [actionKindFilter, setActionKindFilter] = useState<ActionKindFilter>("all");
+  const [actionStatusFilter, setActionStatusFilter] = useState<ActionStatusFilter>("active");
   const [organizePlan, setOrganizePlan] = useState<AiOrganizePlan | null>(null);
   const [organizeResult, setOrganizeResult] = useState<AiOrganizeResult | null>(null);
   const [inboxPlanResult, setInboxPlanResult] = useState<InboxPlanResult | null>(null);
@@ -664,9 +708,13 @@ export default function App() {
     () => todoCandidates.filter((candidate) => candidate.status === "pending"),
     [todoCandidates],
   );
-  const activeActionItems = useMemo(
-    () => todoScheduleItems.filter((item) => !item.isFallback && isActiveActionItem(item)),
+  const realActionItems = useMemo(
+    () => todoScheduleItems.filter((item) => !item.isFallback),
     [todoScheduleItems],
+  );
+  const activeActionItems = useMemo(
+    () => realActionItems.filter((item) => isActiveActionItem(item)),
+    [realActionItems],
   );
   const openTodoItems = useMemo(
     () => activeActionItems.filter((item) => item.kind === "todo"),
@@ -677,8 +725,24 @@ export default function App() {
     [activeActionItems],
   );
   const completedActionItems = useMemo(
-    () => todoScheduleItems.filter((item) => !item.isFallback && item.status === "completed"),
-    [todoScheduleItems],
+    () => realActionItems.filter((item) => item.status === "completed"),
+    [realActionItems],
+  );
+  const visibleActionItems = useMemo(
+    () => {
+      const query = actionSearchText.trim();
+      return realActionItems.filter((item) => {
+        const kindMatches = actionKindFilter === "all" || item.kind === actionKindFilter;
+        return kindMatches
+          && actionItemMatchesStatus(item, actionStatusFilter)
+          && actionItemMatchesQuery(item, query);
+      });
+    },
+    [actionKindFilter, actionSearchText, actionStatusFilter, realActionItems],
+  );
+  const dashboardActionItems = useMemo(
+    () => visibleActionItems.slice(0, 6),
+    [visibleActionItems],
   );
 
   const recentMarkdown = useMemo(() => markdownFiles.slice(0, 5), [markdownFiles]);
@@ -1620,6 +1684,19 @@ export default function App() {
 
   async function cancelActionItem(item: TodoScheduleItem) {
     await updateActionItemStatus(item, "cancelled");
+  }
+
+  async function openActionItemSource(item: TodoScheduleItem) {
+    const sourcePath = item.sourceRelativePath?.trim();
+    if (!sourcePath) {
+      setStatus("行动项没有记录来源文件。");
+      return;
+    }
+    if (isMarkdownPath(sourcePath)) {
+      await openMarkdown(sourcePath);
+      return;
+    }
+    setStatus(`当前只能直接打开 Markdown 来源：${sourcePath}`);
   }
 
   function addStickyNote() {
@@ -3137,28 +3214,104 @@ export default function App() {
                 <Calendar size={18} aria-hidden="true" />
                 TODO / 日程
               </h3>
-              <span>{activeActionItems.length}</span>
+              <span>{visibleActionItems.length}/{realActionItems.length}</span>
+            </div>
+            <div className="action-filter-row">
+              <label className="action-search-field">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  type="search"
+                  value={actionSearchText}
+                  onChange={(event) => setActionSearchText(event.target.value)}
+                  placeholder="搜索标题、来源或备注"
+                />
+              </label>
+              <div className="scope-segmented action-kind-filter" aria-label="行动项类型">
+                <button
+                  type="button"
+                  className={actionKindFilter === "all" ? "active" : undefined}
+                  onClick={() => setActionKindFilter("all")}
+                >
+                  全部
+                </button>
+                <button
+                  type="button"
+                  className={actionKindFilter === "todo" ? "active" : undefined}
+                  onClick={() => setActionKindFilter("todo")}
+                >
+                  TODO
+                </button>
+                <button
+                  type="button"
+                  className={actionKindFilter === "schedule" ? "active" : undefined}
+                  onClick={() => setActionKindFilter("schedule")}
+                >
+                  日程
+                </button>
+              </div>
+              <label className="action-status-field">
+                <span>状态</span>
+                <select
+                  value={actionStatusFilter}
+                  onChange={(event) => setActionStatusFilter(event.target.value as ActionStatusFilter)}
+                >
+                  <option value="active">进行中</option>
+                  <option value="all">全部</option>
+                  <option value="completed">已完成</option>
+                  <option value="cancelled">已取消</option>
+                  <option value="archived">已归档</option>
+                </select>
+              </label>
+              {actionSearchText || actionKindFilter !== "all" || actionStatusFilter !== "active" ? (
+                <button
+                  type="button"
+                  className="tiny-icon-button"
+                  title="清除筛选"
+                  onClick={() => {
+                    setActionSearchText("");
+                    setActionKindFilter("all");
+                    setActionStatusFilter("active");
+                  }}
+                >
+                  <X size={15} aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
             <div className="task-groups">
-              {activeActionItems.slice(0, 4).map((item) => (
+              {dashboardActionItems.map((item) => (
                 <div className="task-line" key={`${item.kind}-${item.id}`}>
                   <input
                     type="checkbox"
                     checked={isCompletedActionItem(item)}
+                    disabled={!isActiveActionItem(item)}
                     aria-label={item.title}
-                    onChange={() => completeActionItem(item)}
+                    onChange={() => {
+                      if (isActiveActionItem(item)) void completeActionItem(item);
+                    }}
                   />
-                  <span>{item.title}</span>
+                  <span title={item.title}>{item.title}</span>
                   <div className="task-meta">
-                    <small>{actionKindLabel(item)} · {actionDateLabel(item)}</small>
-                    <button type="button" className="text-link-button" onClick={() => cancelActionItem(item)}>
-                      取消
-                    </button>
+                    <small>{actionKindLabel(item)} · {actionDateLabel(item)} · {actionStatusLabel(item.status)}</small>
+                    {item.sourceRelativePath ? (
+                      <button
+                        type="button"
+                        className="tiny-icon-button source-link-button"
+                        title={`打开来源：${item.sourceRelativePath}`}
+                        onClick={() => void openActionItemSource(item)}
+                      >
+                        <FileText size={14} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                    {isActiveActionItem(item) ? (
+                      <button type="button" className="text-link-button" onClick={() => cancelActionItem(item)}>
+                        取消
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               ))}
-              {activeActionItems.length === 0 ? (
-                <p className="empty-state">暂无正式 TODO/日程；可在收集箱确认候选后创建。</p>
+              {visibleActionItems.length === 0 ? (
+                <p className="empty-state">没有匹配的正式 TODO/日程；可调整筛选，或在收集箱确认候选后创建。</p>
               ) : null}
             </div>
             <button type="button" className="text-link-button" onClick={() => setActiveView("inbox")}>
@@ -4078,8 +4231,8 @@ export default function App() {
       projectFileCount > 0 ? Math.round((projectMarkdownCount / projectFileCount) * 100) : 0;
     const projectSourceLabel =
       selectedProject?.source === "insights" ? "真实统计" : selectedProject?.source === "tree" ? "Vault 树派生" : "占位兜底";
-    const projectScopedActionItems = activeActionItems
-      .filter((item) => selectedProject?.relativePath && item.sourceRelativePath?.startsWith(selectedProject.relativePath))
+    const projectScopedActionItems = visibleActionItems
+      .filter((item) => relativePathBelongsToPrefix(item.sourceRelativePath, selectedProject?.relativePath))
       .slice(0, 4);
     const projectAuditRows = auditEvents.filter((event) => !event.isFallback).slice(0, 4);
 
@@ -4179,15 +4332,28 @@ export default function App() {
                   <input
                     type="checkbox"
                     checked={isCompletedActionItem(item)}
-                    onChange={() => completeActionItem(item)}
+                    disabled={!isActiveActionItem(item)}
+                    onChange={() => {
+                      if (isActiveActionItem(item)) void completeActionItem(item);
+                    }}
                     aria-label={item.title}
                   />
-                  <span>{item.title}</span>
-                  <small>{actionKindLabel(item)} · {actionDateLabel(item)}</small>
+                  <span title={item.title}>{item.title}</span>
+                  <small>{actionKindLabel(item)} · {actionDateLabel(item)} · {actionStatusLabel(item.status)}</small>
+                  {item.sourceRelativePath ? (
+                    <button
+                      type="button"
+                      className="tiny-icon-button source-link-button"
+                      title={`打开来源：${item.sourceRelativePath}`}
+                      onClick={() => void openActionItemSource(item)}
+                    >
+                      <FileText size={14} aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </div>
               ))}
               {projectScopedActionItems.length === 0 ? (
-                <p className="empty-state">暂无项目路径匹配的正式行动项；可从收集箱候选确认生成。</p>
+                <p className="empty-state">暂无项目路径和当前筛选匹配的正式行动项；可调整仪表盘筛选或从收集箱候选确认生成。</p>
               ) : null}
             </div>
           </article>

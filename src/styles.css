@@ -972,6 +972,59 @@ textarea:focus {
   gap: 8px;
 }
 
+.action-filter-row {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(180px, 1fr) auto auto auto;
+}
+
+.action-search-field,
+.action-status-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.action-search-field {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 34px;
+  padding: 0 9px;
+}
+
+.action-search-field svg {
+  color: var(--muted);
+}
+
+.action-search-field input,
+.action-status-field select {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  min-height: 34px;
+}
+
+.action-search-field input {
+  border: 0;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+}
+
+.action-status-field {
+  min-width: 108px;
+}
+
+.action-status-field span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .task-line {
   align-items: center;
   border-bottom: 1px solid var(--border);
@@ -1006,6 +1059,10 @@ textarea:focus {
 .agent-history small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.source-link-button {
+  color: var(--green);
 }
 
 .recent-list button,
@@ -2354,6 +2411,15 @@ kbd {
   width: 16px;
 }
 
+.task-line input:disabled,
+.project-todo-row input:disabled {
+  opacity: 0.55;
+}
+
+.project-todo-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
 .quick-actions {
   display: flex;
   gap: 12px;
@@ -2782,6 +2848,7 @@ kbd {
   .project-grid,
   .rag-stats,
   .rag-citation-filter,
+  .action-filter-row,
   .status-metric-grid,
   .status-event-grid,
   .audit-filter-row,
