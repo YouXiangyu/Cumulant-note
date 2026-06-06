@@ -211,6 +211,18 @@ textarea:focus {
   gap: 4px;
 }
 
+.conversation-search-row {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 30px 30px;
+}
+
+.conversation-search-row input {
+  min-width: 0;
+  width: 100%;
+}
+
 .nav-item,
 .project-link,
 .conversation-list button,
@@ -707,7 +719,23 @@ textarea:focus {
   padding: 10px 12px;
 }
 
-.rag-conversation-bar div {
+.rag-conversation-actions {
+  align-items: center;
+  display: flex;
+  flex: 1 1 320px;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.rag-conversation-actions input {
+  flex: 1 1 190px;
+  max-width: 280px;
+  min-width: 130px;
+}
+
+.rag-conversation-bar > div:not(.rag-conversation-actions) {
   display: grid;
   gap: 2px;
   min-width: 0;

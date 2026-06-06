@@ -20,6 +20,8 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+const RAG_CONVERSATION_TITLE_MAX_CHARS: usize = 80;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RagIndexRun {
@@ -80,6 +82,9 @@ pub struct RagConversationSummary {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    pub last_message_at: Option<String>,
+    pub message_count: i64,
+    pub match_excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +105,17 @@ pub struct RagConversation {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    pub last_message_at: Option<String>,
+    pub message_count: i64,
     pub messages: Vec<RagMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagConversationDeleteResult {
+    pub conversation_id: i64,
+    pub deleted_messages: i64,
+    pub status: String,
 }
 
 #[derive(Debug, Default)]
@@ -201,9 +216,17 @@ impl RagService {
         let (_, connection) = open_connection(vault_path)?;
         let limit = limit.unwrap_or(50).clamp(1, 100) as i64;
         let mut statement = connection.prepare(
-            "SELECT id, title, created_at, updated_at
-             FROM rag_conversations
-             ORDER BY updated_at DESC, id DESC
+            "SELECT c.id,
+                    c.title,
+                    c.created_at,
+                    c.updated_at,
+                    MAX(m.created_at) AS last_message_at,
+                    COUNT(m.id) AS message_count,
+                    NULL AS match_excerpt
+             FROM rag_conversations c
+             LEFT JOIN rag_messages m ON m.conversation_id = c.id
+             GROUP BY c.id
+             ORDER BY c.updated_at DESC, c.id DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit], conversation_summary_from_row)?;
@@ -215,11 +238,7 @@ impl RagService {
         title: Option<String>,
     ) -> ServiceResult<RagConversationSummary> {
         let (_, connection) = open_connection(vault_path)?;
-        let title = title
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("新会话");
+        let title = normalize_optional_conversation_title(title.as_deref());
         let now = Utc::now().to_rfc3339();
         connection.execute(
             "INSERT INTO rag_conversations (title, created_at, updated_at)
@@ -227,6 +246,96 @@ impl RagService {
             params![title, now],
         )?;
         conversation_summary_by_id(&connection, connection.last_insert_rowid())
+    }
+
+    pub fn rename_conversation(
+        vault_path: &str,
+        conversation_id: i64,
+        title: String,
+    ) -> ServiceResult<RagConversationSummary> {
+        let (_, connection) = open_connection(vault_path)?;
+        let title = normalize_required_conversation_title(&title)?;
+        let now = Utc::now().to_rfc3339();
+        let changed = connection.execute(
+            "UPDATE rag_conversations
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![title, now, conversation_id],
+        )?;
+        if changed == 0 {
+            return Err(ServiceError::InvalidState(format!(
+                "RAG conversation {conversation_id} does not exist"
+            )));
+        }
+        conversation_summary_by_id(&connection, conversation_id)
+    }
+
+    pub fn delete_conversation(
+        vault_path: &str,
+        conversation_id: i64,
+    ) -> ServiceResult<RagConversationDeleteResult> {
+        let (_, mut connection) = open_connection(vault_path)?;
+        ensure_conversation_exists(&connection, conversation_id)?;
+        let transaction = connection.transaction()?;
+        let deleted_messages = transaction.execute(
+            "DELETE FROM rag_messages WHERE conversation_id = ?1",
+            params![conversation_id],
+        )? as i64;
+        transaction.execute(
+            "DELETE FROM rag_conversations WHERE id = ?1",
+            params![conversation_id],
+        )?;
+        transaction.commit()?;
+        Ok(RagConversationDeleteResult {
+            conversation_id,
+            deleted_messages,
+            status: "deleted".to_string(),
+        })
+    }
+
+    pub fn search_conversations(
+        vault_path: &str,
+        query: String,
+        limit: Option<usize>,
+    ) -> ServiceResult<Vec<RagConversationSummary>> {
+        let (_, connection) = open_connection(vault_path)?;
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Self::list_conversations(vault_path, limit);
+        }
+        let pattern = escaped_like_pattern(trimmed);
+        let limit = limit.unwrap_or(50).clamp(1, 100) as i64;
+        let mut statement = connection.prepare(
+            "SELECT c.id,
+                    c.title,
+                    c.created_at,
+                    c.updated_at,
+                    (SELECT MAX(created_at) FROM rag_messages WHERE conversation_id = c.id) AS last_message_at,
+                    (SELECT COUNT(*) FROM rag_messages WHERE conversation_id = c.id) AS message_count,
+                    CASE
+                        WHEN lower(c.title) LIKE ?1 ESCAPE '\\' THEN c.title
+                        ELSE (
+                            SELECT content
+                            FROM rag_messages
+                            WHERE conversation_id = c.id
+                              AND lower(content) LIKE ?1 ESCAPE '\\'
+                            ORDER BY created_at DESC, id DESC
+                            LIMIT 1
+                        )
+                    END AS match_excerpt
+             FROM rag_conversations c
+             WHERE lower(c.title) LIKE ?1 ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1
+                    FROM rag_messages m
+                    WHERE m.conversation_id = c.id
+                      AND lower(m.content) LIKE ?1 ESCAPE '\\'
+                )
+             ORDER BY c.updated_at DESC, c.id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![pattern, limit], conversation_summary_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn get_conversation(
@@ -427,9 +536,17 @@ fn conversation_summary_by_id(
 ) -> ServiceResult<RagConversationSummary> {
     connection
         .query_row(
-            "SELECT id, title, created_at, updated_at
-             FROM rag_conversations
-             WHERE id = ?1",
+            "SELECT c.id,
+                    c.title,
+                    c.created_at,
+                    c.updated_at,
+                    MAX(m.created_at) AS last_message_at,
+                    COUNT(m.id) AS message_count,
+                    NULL AS match_excerpt
+             FROM rag_conversations c
+             LEFT JOIN rag_messages m ON m.conversation_id = c.id
+             WHERE c.id = ?1
+             GROUP BY c.id",
             params![conversation_id],
             conversation_summary_from_row,
         )
@@ -449,6 +566,8 @@ fn conversation_by_id(
         title: summary.title,
         created_at: summary.created_at,
         updated_at: summary.updated_at,
+        last_message_at: summary.last_message_at,
+        message_count: summary.message_count,
         messages: messages_for_conversation(connection, conversation_id)?,
     })
 }
@@ -512,7 +631,47 @@ fn conversation_summary_from_row(
         title: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
+        last_message_at: row.get(4)?,
+        message_count: row.get(5)?,
+        match_excerpt: row.get(6)?,
     })
+}
+
+fn normalize_optional_conversation_title(title: Option<&str>) -> String {
+    title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(truncate_conversation_title)
+        .unwrap_or_else(|| "新会话".to_string())
+}
+
+fn normalize_required_conversation_title(title: &str) -> ServiceResult<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceError::InvalidState(
+            "RAG conversation title must not be empty".to_string(),
+        ));
+    }
+    Ok(truncate_conversation_title(trimmed))
+}
+
+fn truncate_conversation_title(title: &str) -> String {
+    title
+        .chars()
+        .take(RAG_CONVERSATION_TITLE_MAX_CHARS)
+        .collect()
+}
+
+fn escaped_like_pattern(query: &str) -> String {
+    let mut pattern = String::from("%");
+    for ch in query.to_lowercase().chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
 }
 
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RagMessage> {
@@ -889,6 +1048,81 @@ mod tests {
         assert_eq!(list[0].id, second.id);
         assert_eq!(detail.id, first.id);
         assert!(detail.messages.is_empty());
+    }
+
+    #[test]
+    fn conversations_can_be_renamed_searched_and_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join("Projects")).unwrap();
+        fs::write(
+            temp.path().join("Projects").join("alpha.md"),
+            "# Alpha\nalpha planning context",
+        )
+        .unwrap();
+        RagService::rebuild_index(temp.path().to_str().unwrap()).unwrap();
+        let conversation = RagService::create_conversation(
+            temp.path().to_str().unwrap(),
+            Some("Initial title".to_string()),
+        )
+        .unwrap();
+        RagService::ask_with_options(
+            temp.path().to_str().unwrap(),
+            "alpha planning",
+            Some(4),
+            Some(conversation.id),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let renamed = RagService::rename_conversation(
+            temp.path().to_str().unwrap(),
+            conversation.id,
+            "  Alpha research thread  ".to_string(),
+        )
+        .unwrap();
+        let title_hits = RagService::search_conversations(
+            temp.path().to_str().unwrap(),
+            "research".to_string(),
+            Some(10),
+        )
+        .unwrap();
+        let message_hits = RagService::search_conversations(
+            temp.path().to_str().unwrap(),
+            "planning".to_string(),
+            Some(10),
+        )
+        .unwrap();
+
+        assert_eq!(renamed.title, "Alpha research thread");
+        assert_eq!(renamed.message_count, 2);
+        assert_eq!(title_hits[0].id, conversation.id);
+        assert_eq!(
+            title_hits[0].match_excerpt.as_deref(),
+            Some("Alpha research thread")
+        );
+        assert_eq!(message_hits[0].id, conversation.id);
+        assert!(message_hits[0]
+            .match_excerpt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("planning"));
+
+        let deleted =
+            RagService::delete_conversation(temp.path().to_str().unwrap(), conversation.id)
+                .unwrap();
+        let list = RagService::list_conversations(temp.path().to_str().unwrap(), None).unwrap();
+        let (_, connection) = open_connection(temp.path().to_str().unwrap()).unwrap();
+        let message_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM rag_messages", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(deleted.status, "deleted");
+        assert_eq!(deleted.deleted_messages, 2);
+        assert!(list.is_empty());
+        assert_eq!(message_count, 0);
+        assert!(temp.path().join("Projects").join("alpha.md").exists());
     }
 
     #[test]

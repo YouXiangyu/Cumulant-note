@@ -464,6 +464,8 @@ export default function App() {
   const [ragConversations, setRagConversations] = useState<RagConversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [ragMessages, setRagMessages] = useState<RagMessage[]>([]);
+  const [ragConversationSearchText, setRagConversationSearchText] = useState("");
+  const [ragConversationRenameTitle, setRagConversationRenameTitle] = useState("");
   const [ragScopeKind, setRagScopeKind] = useState<RagScopeKind>("allVault");
   const [ragHistoryNotice, setRagHistoryNotice] = useState("");
   const [exported, setExported] = useState("");
@@ -589,6 +591,10 @@ export default function App() {
     () => ragConversations.find((conversation) => conversation.id === activeConversationId) ?? null,
     [activeConversationId, ragConversations],
   );
+
+  useEffect(() => {
+    setRagConversationRenameTitle(activeConversation ? conversationTitle(activeConversation) : "");
+  }, [activeConversation?.id, activeConversation?.title]);
 
   const currentMarkdownRelativePath = useMemo(() => {
     if (isMarkdownPath(markdownDoc?.relativePath)) return markdownDoc.relativePath;
@@ -1904,6 +1910,76 @@ export default function App() {
     setActiveView("dashboard");
   }
 
+  async function searchRagConversationHistory() {
+    if (!vaultPath) return;
+    const query = ragConversationSearchText.trim();
+    const result = await run(
+      () => (query ? commands.searchRagConversations(vaultPath, query, 20) : commands.listRagConversations(vaultPath, 20)),
+      query ? "搜索 RAG 会话" : "刷新 RAG 会话",
+      query ? "RAG 会话搜索已更新" : "RAG 会话列表已刷新",
+    );
+    if (!result) return;
+    setRagConversations(result);
+    if (activeConversationId && !result.some((conversation) => conversation.id === activeConversationId)) {
+      setActiveConversationId(null);
+      setRagMessages([]);
+    }
+    setRagHistoryNotice(query ? `已按“${query}”筛选 RAG 会话历史。` : "");
+  }
+
+  async function clearRagConversationSearch() {
+    setRagConversationSearchText("");
+    if (!vaultPath) return;
+    const result = await run(
+      () => commands.listRagConversations(vaultPath, 20),
+      "刷新 RAG 会话",
+      "RAG 会话列表已刷新",
+    );
+    if (!result) return;
+    setRagConversations(result);
+    setRagHistoryNotice("");
+  }
+
+  async function renameActiveRagConversation() {
+    if (!vaultPath || !activeConversationId) return;
+    const title = ragConversationRenameTitle.trim();
+    if (!title) {
+      setAppError({
+        title: "会话标题为空",
+        detail: "RAG 会话重命名需要一个非空标题。",
+        recovery: "输入一个用于历史列表展示的短标题。",
+      });
+      return;
+    }
+    const result = await run(
+      () => commands.renameRagConversation(vaultPath, activeConversationId, title),
+      "重命名 RAG 会话",
+      "RAG 会话已重命名",
+    );
+    if (!result || result.isFallback) return;
+    setRagConversations((current) => [result, ...current.filter((item) => item.id !== result.id)]);
+    setRagHistoryNotice("当前 RAG 会话标题已更新。");
+  }
+
+  async function deleteActiveRagConversation() {
+    if (!vaultPath || !activeConversationId || !activeConversation) return;
+    const ok = window.confirm(`删除 RAG 会话“${conversationTitle(activeConversation)}”？这只会删除 .thebrain 内的会话历史，不会删除 Vault 文件。`);
+    if (!ok) return;
+    const result = await run(
+      () => commands.deleteRagConversation(vaultPath, activeConversationId),
+      "删除 RAG 会话",
+      "RAG 会话已删除",
+    );
+    if (!result || result.isFallback) return;
+    const deletedId = result.conversationId;
+    setRagConversations((current) => current.filter((item) => item.id !== deletedId));
+    setActiveConversationId(null);
+    setRagMessages([]);
+    setRagAnswer(null);
+    setRagTrace(null);
+    setRagHistoryNotice(`已删除 RAG 会话历史和 ${result.deletedMessages} 条消息；Vault 文件未改动。`);
+  }
+
   function ragScopePrefix(kind: "dashboard" | "project"): string {
     if (kind === "project") return selectedProject?.relativePath ?? "";
     return currentDirectoryPrefix || selectedProject?.relativePath || "";
@@ -2629,6 +2705,26 @@ export default function App() {
               <Plus size={14} aria-hidden="true" />
             </button>
           </div>
+          <div className="conversation-search-row">
+            <input
+              aria-label="搜索 RAG 会话历史"
+              value={ragConversationSearchText}
+              placeholder="搜索会话或消息"
+              onChange={(event) => setRagConversationSearchText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void searchRagConversationHistory();
+                }
+              }}
+            />
+            <button type="button" className="tiny-icon-button" title="搜索" onClick={() => void searchRagConversationHistory()}>
+              <Search size={14} aria-hidden="true" />
+            </button>
+            <button type="button" className="tiny-icon-button" title="清除搜索" onClick={() => void clearRagConversationSearch()}>
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
           <div className="conversation-list">
             {ragConversations.map((conversation) => (
               <button
@@ -2641,6 +2737,7 @@ export default function App() {
                 <small>
                   {conversation.messageCount ? `${conversation.messageCount} 条` : "暂无消息"} · {formatDate(conversation.lastMessageAt ?? conversation.updatedAt)}
                 </small>
+                {conversation.matchExcerpt ? <small>命中：{boundedSnippet(conversation.matchExcerpt)}</small> : null}
               </button>
             ))}
             {ragConversations.length === 0 ? <p className="sidebar-empty">暂无 RAG 会话</p> : null}
@@ -2809,9 +2906,32 @@ export default function App() {
               <span>当前会话</span>
               <strong>{activeConversation ? conversationTitle(activeConversation) : "新 RAG 对话"}</strong>
             </div>
-            <button type="button" className="text-link-button" onClick={startNewRagConversation}>
-              新对话
-            </button>
+            <div className="rag-conversation-actions">
+              {activeConversation ? (
+                <>
+                  <input
+                    aria-label="RAG 会话标题"
+                    value={ragConversationRenameTitle}
+                    onChange={(event) => setRagConversationRenameTitle(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void renameActiveRagConversation();
+                      }
+                    }}
+                  />
+                  <button type="button" className="tiny-icon-button" title="重命名会话" onClick={() => void renameActiveRagConversation()}>
+                    <Pencil size={14} aria-hidden="true" />
+                  </button>
+                  <button type="button" className="tiny-icon-button danger-soft" title="删除会话历史" onClick={() => void deleteActiveRagConversation()}>
+                    <Trash2 size={14} aria-hidden="true" />
+                  </button>
+                </>
+              ) : null}
+              <button type="button" className="text-link-button" onClick={startNewRagConversation}>
+                新对话
+              </button>
+            </div>
           </div>
           {ragHistoryNotice ? <p className="rag-history-notice">{ragHistoryNotice}</p> : null}
           <div className="rag-message-list" aria-label="当前 RAG 会话消息">

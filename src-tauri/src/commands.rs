@@ -24,7 +24,8 @@ use crate::services::markdown::{MarkdownDocument, MarkdownExport, MarkdownServic
 use crate::services::movement::{MoveLog, MoveRequest, MovementService, RollbackPreviewItem};
 use crate::services::queue::{ListenerState, QueueItem, QueueService};
 use crate::services::rag::{
-    RagAnswer, RagConversation, RagConversationSummary, RagIndexRun, RagIndexStatus, RagService,
+    RagAnswer, RagConversation, RagConversationDeleteResult, RagConversationSummary, RagIndexRun,
+    RagIndexStatus, RagService,
 };
 use crate::services::rag_trace::RagTraceRun;
 use crate::services::retrieval::RagScope;
@@ -526,6 +527,39 @@ pub fn create_rag_conversation(
     title: Option<String>,
 ) -> Result<RagConversationSummary, String> {
     into_command_result(RagService::create_conversation(&vault_path, title))
+}
+
+#[tauri::command]
+pub fn rename_rag_conversation(
+    vault_path: String,
+    conversation_id: i64,
+    title: String,
+) -> Result<RagConversationSummary, String> {
+    into_command_result(RagService::rename_conversation(
+        &vault_path,
+        conversation_id,
+        title,
+    ))
+}
+
+#[tauri::command]
+pub fn delete_rag_conversation(
+    vault_path: String,
+    conversation_id: i64,
+) -> Result<RagConversationDeleteResult, String> {
+    into_command_result(RagService::delete_conversation(
+        &vault_path,
+        conversation_id,
+    ))
+}
+
+#[tauri::command]
+pub fn search_rag_conversations(
+    vault_path: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<RagConversationSummary>, String> {
+    into_command_result(RagService::search_conversations(&vault_path, query, limit))
 }
 
 #[tauri::command]

@@ -92,6 +92,7 @@ export interface RagConversation extends CommandMeta {
   updatedAt: string;
   lastMessageAt?: string;
   messageCount?: number;
+  matchExcerpt?: string;
 }
 
 export interface RagMessage extends CommandMeta {
@@ -109,6 +110,12 @@ export interface RagMessage extends CommandMeta {
 export interface RagConversationDetail extends CommandMeta {
   conversation: RagConversation;
   messages: RagMessage[];
+}
+
+export interface RagConversationDeleteResult extends CommandMeta {
+  conversationId: number;
+  deletedMessages: number;
+  status: string;
 }
 
 export interface RagCitation {
@@ -1764,6 +1771,7 @@ function normalizeRagConversation(raw: any): RagConversation {
     updatedAt: raw.updatedAt ?? raw.updated_at ?? raw.lastMessageAt ?? raw.last_message_at ?? nowIso(),
     lastMessageAt: raw.lastMessageAt ?? raw.last_message_at,
     messageCount: raw.messageCount ?? raw.message_count,
+    matchExcerpt: raw.matchExcerpt ?? raw.match_excerpt,
     isFallback: raw.isFallback,
     fallbackReason: raw.fallbackReason,
   };
@@ -1794,6 +1802,16 @@ function normalizeRagConversationDetail(raw: any): RagConversationDetail {
     messages: Array.isArray(raw?.messages) ? raw.messages.map(normalizeRagMessage) : [],
     isFallback: raw?.isFallback ?? conversation.isFallback,
     fallbackReason: raw?.fallbackReason ?? conversation.fallbackReason,
+  };
+}
+
+function normalizeRagConversationDeleteResult(raw: any): RagConversationDeleteResult {
+  return {
+    conversationId: Number(raw?.conversationId ?? raw?.conversation_id ?? 0),
+    deletedMessages: Number(raw?.deletedMessages ?? raw?.deleted_messages ?? 0),
+    status: raw?.status ?? "deleted",
+    isFallback: raw?.isFallback ?? raw?.is_fallback,
+    fallbackReason: raw?.fallbackReason ?? raw?.fallback_reason,
   };
 }
 
@@ -2148,6 +2166,30 @@ export const commands = {
       { vaultPath, title },
       (reason) => fallbackRagConversation(title, reason),
     ).then(normalizeRagConversation),
+  renameRagConversation: (vaultPath: string, conversationId: number, title: string) =>
+    invokeWithFallback<any>(
+      "rename_rag_conversation",
+      { vaultPath, conversationId, title },
+      (reason) => ({ ...fallbackRagConversation(title, reason), id: conversationId }),
+    ).then(normalizeRagConversation),
+  deleteRagConversation: (vaultPath: string, conversationId: number) =>
+    invokeWithFallback<any>(
+      "delete_rag_conversation",
+      { vaultPath, conversationId },
+      (reason) => ({
+        conversationId,
+        deletedMessages: 0,
+        status: "failed",
+        isFallback: true,
+        fallbackReason: reason,
+      }),
+    ).then(normalizeRagConversationDeleteResult),
+  searchRagConversations: (vaultPath: string, query: string, limit = 20) =>
+    invokeWithFallback<any[]>(
+      "search_rag_conversations",
+      { vaultPath, query, limit },
+      fallbackRagConversations,
+    ).then((items) => items.map(normalizeRagConversation)),
   getRagConversation: (vaultPath: string, conversationId: number) =>
     invokeWithFallback<any>(
       "get_rag_conversation",
