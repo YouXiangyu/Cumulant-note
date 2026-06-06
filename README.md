@@ -18,7 +18,7 @@ TheBrain 是一个本地优先的个人外置大脑桌面应用。它以类 Obsi
 - 收集箱队列的第一层可信 worker：手动单轮消费 pending 队列、暂停/恢复、稳定等待、预算检查、MiMo 抽取与整理决策、非 mock 且可信时自动移动、失败/冲突写入内部状态；低置信度、目标冲突、收集箱内目标或新目录建议会写入结构化确认原因，供队列、audit 和冲突 UI 展示。
 - 应用内 resident worker 第一版：用户可在收集箱页手动启动/停止 5 秒 tick 的常驻消费循环；它复用 `WorkerService::drain`，单并发、每 tick 最多处理 1 条队列项，不是系统服务，也不会随应用启动自动运行。
 - 冲突问题与规则记忆第一版：前端可查看 open conflict、只读预览源/目标文件状态与文本片段、选择处理动作、使用只读重命名建议、记录用户答案、写入 `.thebrain/rules/inbox-organizing-rules.md`，并用 `.thebrain/index.sqlite` 保存规则索引、命中、启用/禁用/编辑状态和审计；相似冲突会优先展示推荐规则，用户确认后才应用，不做静默覆盖或删除。
-- 收集箱整理状态面板与恢复动作第一版：集中展示 listener、queue、worker、resident worker、conflict、movement log 和 audit timeline 的状态、最近事件和最近错误；主操作区提供导入、递归扫描入队、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项恢复、批量恢复预览/确认、整理计划确认原因、冲突规则处理、movement log 单项回滚和批量回滚预览/确认。
+- 收集箱整理状态面板与恢复动作第一版：集中展示 listener、queue、worker、resident worker、conflict、movement log 和 audit timeline 的状态、最近事件和最近错误；主操作区提供导入、递归扫描入队、生成计划、运行整理、恢复并运行 worker、启动/停止常驻 worker 和启动/停止监听，状态面板保留失败/冲突队列项单项恢复、批量恢复预览/确认、整理计划确认原因、audit 日期范围筛选/分页加载/详情展开、冲突规则处理、movement log 单项回滚和批量回滚预览/确认。
 - MiMo provider 路径、设置页 key 保存、BOM 污染检测、预算状态、用量占位账本和 fallback/pending 状态。
 - md/txt 本地 RAG 索引、关键词检索、local semantic placeholder、引用、Trace、会话历史和范围检索第一版；RAG/MiMo 问答通过后台任务运行，避免长时间 AI 响应阻塞桌面 UI。
 - 前端工作台：主仪表盘、收集箱、Markdown 编辑器、便利贴、个人页、项目页和设置页；其中个人页和项目页已接入 Workspace Insights 第一版真实统计和正式 TODO/日程第一增量，学习曲线、项目级 Agent 历史、提醒通知和联系人档案仍是占位或后续目标。
@@ -61,7 +61,7 @@ AI 可以在用户指定的 Vault 范围内自动整理并移动 `000-收集箱/
 - embedding、AI prompt/response、token usage、移动历史、队列日志不写入 Markdown frontmatter，只进入 `.thebrain` 内部结构。
 - TODO、日程、联系人档案等行动项可以由 AI 生成候选；是否自动写入正式系统需要在后续 PRD 中按场景定义。
 
-当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、Archive Map 本地目录语义摘要第一增量、Archive Map 用户目录说明/锁定规则第一增量、整理决策确认元数据第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态，并在计划详情、队列 payload、audit payload 和冲突详情中保留结构化确认原因；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、真正的差异预览和更完整的自动冲突处理仍是后续目标。
+当前代码已经具备收集箱递归展示、递归扫描入队、监听入队、移动、空目录清理、日志、回滚、手动触发的单并发队列消费能力、手动启动/停止的应用内 resident worker 第一版、Archive Map 第一版、Archive Map 健康/失效/历史归档命中展示第一增量、Archive Map 本地目录语义摘要第一增量、Archive Map 用户目录说明/锁定规则第一增量、整理决策确认元数据第一增量、冲突问答与规则记忆第一版，以及收集箱状态面板、audit timeline 搜索/类型筛选/日期范围/分页/详情展开第一版、队列批量恢复预览/确认和 movement log 批量回滚预览/确认第一版；整理计划、手动 worker 和 resident worker 已共用 Archive Map 上下文，低置信度、目标冲突、收集箱内目标或不在 Archive Map 中的新目录建议会停在 pending/conflict 状态，并在计划详情、队列 payload、audit payload 和冲突详情中保留结构化确认原因；系统级后台服务、应用启动自启、长时间实机监听稳定性、更完整批量处理策略、真正的差异预览和更完整的自动冲突处理仍是后续目标。
 
 Archive Map 的设计边界是：只扫描正式 Vault 归档目录，完全排除 `000-收集箱/` 及其子目录。`000-收集箱/` 只作为待处理来源，不作为归档目标，也不提供归档分类结构；历史参考只能来自 `收集箱-已整理.md`、movement log 或 audit events 中的已完成移动记录。
 
@@ -162,11 +162,11 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - 单文件计划命令 `plan_inbox_item`，返回 extraction、structured plan、候选、预算状态，以及 Archive Map 命中、新目录建议和确认原因元数据。
 - 第一层 worker 命令 `get_worker_status`、`run_inbox_worker`、`pause_inbox_worker`、`resume_inbox_worker`，支持手动消费队列、暂停恢复、失败/冲突状态展示，并把整理决策确认元数据写入 worker 结果、queue payload 和 audit payload。
 - resident worker 命令 `get_resident_worker_status`、`start_resident_worker`、`stop_resident_worker`，支持用户手动启动/停止应用内常驻消费循环，默认 5 秒 tick、单并发、每 tick 最多处理 1 条队列项。
-- 收集箱整理状态面板，集中展示 listener、queue、worker、resident worker、conflict、movement log、audit timeline、最近事件和最近错误，并支持 audit 搜索/类型筛选第一版。
+- 收集箱整理状态面板，集中展示 listener、queue、worker、resident worker、conflict、movement log、audit timeline、最近事件和最近错误，并支持 audit 搜索、类型筛选、日期范围、分页加载和详情展开第一版。
 - 队列单项/批量恢复命令 `retry_queue_item`、`skip_queue_item`、`retry_queue_items`、`skip_queue_items` 和只读预览命令 `preview_queue_recovery`，支持失败/冲突/运行中项目恢复为 pending，或把待处理/失败/冲突/运行中项目标记为 skipped；前端批量操作会先展示 eligible/blocked 预览，再由用户确认执行。
 - 自动/手动移动基础命令，更新 ledger、movement log、audit events。
 - movement log 列表命令 `list_move_logs`、单项回滚命令 `rollback_move`、批量回滚命令 `rollback_moves` 和只读预览命令 `preview_rollback_moves`，不覆盖已有文件；前端批量回滚会先展示当前文件/恢复目标/阻塞原因，再由用户确认执行。
-- audit timeline 命令 `list_audit_events` 和 `search_audit_events`，支持读取最近 audit events、按类型和文本搜索，并在收集箱页面展示筛选结果。
+- audit timeline 命令 `list_audit_events` 和 `search_audit_events`，支持读取最近 audit events，按类型、文本、路径、状态、时间范围和 cursor 搜索；收集箱页面已接入类型/文本/日期范围筛选、分页加载和 bounded payload 详情展开。
 - TODO/日程候选创建、确认、忽略。
 - TODO/日程正式行动项第一增量：`promote_todo_schedule_candidate`、`list_todo_items`、`list_schedule_items`、`set_todo_item_status`、`set_schedule_item_status` 已接入；promotion 对同一候选幂等，不重复创建正式项。
 - 预算暂停/耗尽状态和 `ai_usage` 用量占位记录。
@@ -186,7 +186,7 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - 真实 MiMo API 的长时间、多文件类型、带成本实机联调。
 - MiMo 返回 token/cost 的真实精确统计。
 - 完整冲突解决 UI 增强：当前已有只读重命名建议、bounded preview、动作选择、规则启用/禁用/编辑第一版；后续仍需真正的 diff 视图、批量冲突处理、强确认的覆盖/重命名执行流和更细的恢复体验。
-- 更完整的状态面板和恢复体验：当前已有 audit 搜索/类型筛选、队列批量恢复预览/确认和 movement 批量回滚预览/确认第一版；后续仍需分页时间线详情、日期范围 UI、批量恢复差异预览、冲突恢复策略和更细粒度确认。
+- 更完整的状态面板和恢复体验：当前已有 audit 搜索/类型筛选/日期范围/分页/详情展开、队列批量恢复预览/确认和 movement 批量回滚预览/确认第一版；后续仍需长期审计分析、批量恢复差异预览、冲突恢复策略和更细粒度确认。
 - 真实 embedding、向量检索、重排模型、跨会话长期记忆策略和复杂个人统计。
 - RAG 会话增强：会话重命名、删除、历史搜索、引用筛选和更完整的跨会话长期记忆策略。
 - PDF、DOCX、PPTX、URL 的真实解析。
@@ -214,4 +214,4 @@ MiMo 是 AI provider，负责抽取、理解、整理建议和回答生成；lis
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 
-当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。
+当前 Rust 单元测试覆盖 Vault 初始化、路径安全、Markdown frontmatter、ledger、SQLite schema、Archive Map 扫描/排除规则/Markdown 生成/历史引用、本地目录语义摘要、健康失效检测、movement log 历史归档命中统计、目录规则持久化/快照合并/路径拒绝、整理决策确认元数据、收集箱递归展示、listener 递归扫描/跳过规则/稳定等待/去重、队列 claim/retry/单项跳过、预算、audit 列表/搜索/日期范围/cursor、导入、导入队列项 worker 处理、MiMo fallback、worker 暂停与失败不移动、worker 阻断元数据写入队列 payload、resident worker 保守参数、批量 ID 防误操作、移动/空目录清理/回滚、冲突规则 Markdown 写入、相似规则推荐、规则应用不覆盖、规则禁用排除匹配、只读重命名建议、冲突 bounded preview、规则路径不被 listener 处理、TODO/日程候选、正式 TODO/日程 promotion 和状态更新、便利贴、RAG 基础能力、RAG 会话持久化、RAG 范围检索和 Workspace Insights 聚合。

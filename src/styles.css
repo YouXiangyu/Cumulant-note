@@ -1174,12 +1174,24 @@ textarea:focus {
 .audit-filter-row {
   display: grid;
   gap: 9px;
-  grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) auto auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) repeat(2, minmax(118px, 150px)) auto auto;
 }
 
 .audit-filter-row input,
 .audit-filter-row select {
   min-width: 0;
+}
+
+.audit-filter-row label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.audit-filter-row label span,
+.audit-pagination-row span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .batch-preview {
@@ -1265,7 +1277,11 @@ textarea:focus {
 
 .audit-timeline-list article {
   background: var(--surface-soft);
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.audit-timeline-list article.is-expanded {
+  align-items: start;
 }
 
 .status-conflict-card {
@@ -1311,6 +1327,29 @@ textarea:focus {
 .status-conflict-card small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.audit-timeline-list code {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  display: block;
+  font-family: "SFMono-Regular", Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  grid-column: 1 / -1;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.audit-pagination-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  justify-content: flex-end;
 }
 
 .status-conflict-card textarea {

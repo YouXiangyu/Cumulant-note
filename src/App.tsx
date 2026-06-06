@@ -70,6 +70,7 @@ import {
   ArchiveMapSnapshot,
   AppSettings,
   AuditEvent,
+  AuditSearchQuery,
   BatchQueueRecoveryPreview,
   BatchRollbackPreview,
   BudgetStatus,
@@ -173,6 +174,11 @@ function safeJson(value: unknown): string {
   return JSON.stringify(value ?? {}, null, 2);
 }
 
+function boundedJson(value: unknown, maxLength = 4000): string {
+  const text = safeJson(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}\n... truncated` : text;
+}
+
 function readStorage<T>(key: string, fallback: T): T {
   try {
     const value = localStorage.getItem(key);
@@ -205,6 +211,16 @@ function formatDate(value?: string | number): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return typeof value === "string" ? value : "未记录";
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function dateInputToIso(value: string, edge: "start" | "end"): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return undefined;
+  if (edge === "end") {
+    date.setHours(23, 59, 59, 999);
+  }
+  return date.toISOString();
 }
 
 function isActiveActionItem(item: TodoScheduleItem): boolean {
@@ -448,6 +464,10 @@ export default function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [auditSearchText, setAuditSearchText] = useState("");
   const [auditEventTypeFilter, setAuditEventTypeFilter] = useState("");
+  const [auditStartDate, setAuditStartDate] = useState("");
+  const [auditEndDate, setAuditEndDate] = useState("");
+  const [auditNextBeforeId, setAuditNextBeforeId] = useState<number | undefined>(undefined);
+  const [expandedAuditEventId, setExpandedAuditEventId] = useState<number | null>(null);
   const [batchRecoveryPreview, setBatchRecoveryPreview] = useState<BatchRecoveryPreviewState | null>(null);
   const [workspaceInsights, setWorkspaceInsights] = useState<WorkspaceInsights | null>(null);
   const [todoCandidates, setTodoCandidates] = useState<TodoScheduleCandidate[]>([]);
@@ -817,6 +837,8 @@ export default function App() {
     setConflictRules(nextConflictRules);
     setMoveLogs(nextMoveLogs);
     setAuditEvents(nextAuditEvents);
+    setAuditNextBeforeId(nextAuditEvents.length >= 30 ? nextAuditEvents.at(-1)?.id : undefined);
+    setExpandedAuditEventId(null);
     setWorkspaceInsights(nextWorkspaceInsights);
     setTodoCandidates(nextTodoCandidates);
     setTodoScheduleItems(nextTodoScheduleItems);
@@ -1406,24 +1428,51 @@ export default function App() {
   async function applyAuditSearch() {
     if (!vaultPath) return;
     const result = await run(
-      () =>
-        commands.searchAuditEvents(vaultPath, {
-          text: auditSearchText.trim() || undefined,
-          eventTypes: auditEventTypeFilter ? [auditEventTypeFilter] : undefined,
-          limit: 80,
-        }),
+      () => commands.searchAuditEvents(vaultPath, buildAuditSearchQuery()),
       "搜索 audit timeline",
       "audit timeline 已筛选",
     );
     if (!result) return;
     setAuditEvents(result.events);
+    setAuditNextBeforeId(result.nextBeforeId);
+    setExpandedAuditEventId(null);
     setStatus(`audit 筛选完成：${result.events.length} / limit ${result.appliedLimit}`);
+  }
+
+  function buildAuditSearchQuery(beforeId?: number): AuditSearchQuery {
+    return {
+      text: auditSearchText.trim() || undefined,
+      eventTypes: auditEventTypeFilter ? [auditEventTypeFilter] : undefined,
+      createdAfter: dateInputToIso(auditStartDate, "start"),
+      createdBefore: dateInputToIso(auditEndDate, "end"),
+      limit: 30,
+      beforeId,
+    };
+  }
+
+  async function loadMoreAuditEvents() {
+    if (!vaultPath || !auditNextBeforeId) return;
+    const result = await run(
+      () => commands.searchAuditEvents(vaultPath, buildAuditSearchQuery(auditNextBeforeId)),
+      "加载更多 audit timeline",
+      "audit timeline 已加载更多",
+    );
+    if (!result) return;
+    setAuditEvents((events) => {
+      const seen = new Set(events.map((event) => event.id));
+      return [...events, ...result.events.filter((event) => !seen.has(event.id))];
+    });
+    setAuditNextBeforeId(result.events.length > 0 ? result.nextBeforeId : undefined);
+    setStatus(`audit 已加载更多：新增 ${result.events.length} 条`);
   }
 
   async function resetAuditSearch() {
     if (!vaultPath) return;
     setAuditSearchText("");
     setAuditEventTypeFilter("");
+    setAuditStartDate("");
+    setAuditEndDate("");
+    setExpandedAuditEventId(null);
     const events = await run(
       () => commands.listAuditEvents(vaultPath, 30),
       "重置 audit timeline",
@@ -1431,6 +1480,7 @@ export default function App() {
     );
     if (!events) return;
     setAuditEvents(events);
+    setAuditNextBeforeId(events.length >= 30 ? events.at(-1)?.id : undefined);
   }
 
   async function confirmCandidate(candidate: TodoScheduleCandidate) {
@@ -2199,7 +2249,7 @@ export default function App() {
   }
 
   function renderAuditTimelinePanel() {
-    const recentEvents = auditEvents.slice(0, 12);
+    const recentEvents = auditEvents;
     const filterTypes = auditEventTypeFilter && !auditEventTypes.includes(auditEventTypeFilter)
       ? [auditEventTypeFilter, ...auditEventTypes]
       : auditEventTypes;
@@ -2229,6 +2279,24 @@ export default function App() {
               <option value={eventType} key={eventType}>{eventType}</option>
             ))}
           </select>
+          <label>
+            <span>开始</span>
+            <input
+              type="date"
+              value={auditStartDate}
+              onChange={(event) => setAuditStartDate(event.target.value)}
+              aria-label="audit 开始日期"
+            />
+          </label>
+          <label>
+            <span>结束</span>
+            <input
+              type="date"
+              value={auditEndDate}
+              onChange={(event) => setAuditEndDate(event.target.value)}
+              aria-label="audit 结束日期"
+            />
+          </label>
           <button type="button" className="secondary-button" onClick={applyAuditSearch} disabled={!vaultPath}>
             应用筛选
           </button>
@@ -2236,22 +2304,41 @@ export default function App() {
             重置
           </button>
         </div>
-        <p className="insights-note muted">筛选结果来自 `.thebrain/index.sqlite` audit_events；当前 UI 仍只展示前 12 条。</p>
+        <p className="insights-note muted">筛选结果来自 `.thebrain/index.sqlite` audit_events；当前已加载 {auditEvents.length} 条。</p>
         {recentEvents.length > 0 ? (
           <div className="audit-timeline-list">
-            {recentEvents.map((event) => (
-              <article key={event.id}>
-                <div>
-                  <strong>{event.eventType}</strong>
-                  <span>{auditPayloadSummary(event)}</span>
-                </div>
-                <small>{formatDate(event.createdAt)}</small>
-              </article>
-            ))}
+            {recentEvents.map((event) => {
+              const isExpanded = expandedAuditEventId === event.id;
+              return (
+                <article className={isExpanded ? "is-expanded" : undefined} key={event.id}>
+                  <div>
+                    <strong>{event.eventType}</strong>
+                    <span>{auditPayloadSummary(event)}</span>
+                  </div>
+                  <small>{formatDate(event.createdAt)}</small>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => setExpandedAuditEventId(isExpanded ? null : event.id)}
+                  >
+                    {isExpanded ? "收起" : "详情"}
+                  </button>
+                  {isExpanded ? (
+                    <code>{boundedJson(event.payload)}</code>
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
         ) : (
           <p className="empty-state">暂无 audit 事件</p>
         )}
+        <div className="audit-pagination-row">
+          <button type="button" className="secondary-button" onClick={loadMoreAuditEvents} disabled={!vaultPath || !auditNextBeforeId}>
+            加载更多
+          </button>
+          <span>{auditNextBeforeId ? `下一页 before #${auditNextBeforeId}` : "没有更多已加载游标"}</span>
+        </div>
       </section>
     );
   }

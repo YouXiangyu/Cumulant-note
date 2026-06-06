@@ -2501,6 +2501,7 @@ export const commands = {
           },
         ],
         appliedLimit: query.limit ?? 30,
+        nextBeforeId: undefined,
         isFallback: true,
         fallbackReason: reason,
       }),

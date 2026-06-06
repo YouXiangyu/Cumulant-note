@@ -406,4 +406,74 @@ mod tests {
         assert_eq!(moved.events.len(), 1);
         assert_eq!(moved.events[0].id, second.id);
     }
+
+    #[test]
+    fn audit_search_filters_by_date_range_and_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        VaultService::init(temp.path().to_str().unwrap()).unwrap();
+        let connection = open_index_for_vault(temp.path().to_str().unwrap()).unwrap();
+        for (event_type, created_at) in [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("middle", "2026-02-15T12:00:00Z"),
+            ("new", "2026-03-01T00:00:00Z"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO audit_events (event_type, payload_json, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        event_type,
+                        serde_json::to_string(&json!({"status": event_type})).unwrap(),
+                        created_at
+                    ],
+                )
+                .unwrap();
+        }
+
+        let february = AuditService::search(
+            temp.path().to_str().unwrap(),
+            AuditSearchQuery {
+                created_after: Some("2026-02-01T00:00:00Z".to_string()),
+                created_before: Some("2026-02-28T23:59:59Z".to_string()),
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(february.events.len(), 1);
+        assert_eq!(february.events[0].event_type, "middle");
+
+        let first_page = AuditService::search(
+            temp.path().to_str().unwrap(),
+            AuditSearchQuery {
+                created_after: Some("2026-01-01T00:00:00Z".to_string()),
+                created_before: Some("2026-03-31T23:59:59Z".to_string()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            first_page
+                .events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "middle"]
+        );
+
+        let second_page = AuditService::search(
+            temp.path().to_str().unwrap(),
+            AuditSearchQuery {
+                created_after: Some("2026-01-01T00:00:00Z".to_string()),
+                created_before: Some("2026-03-31T23:59:59Z".to_string()),
+                before_id: first_page.next_before_id,
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second_page.events.len(), 1);
+        assert_eq!(second_page.events[0].event_type, "old");
+    }
 }

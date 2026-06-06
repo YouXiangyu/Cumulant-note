@@ -28,9 +28,9 @@ Roadmap 用来描述阶段目标，不作为承诺日期。README 只链接当�
 - 冲突策略：已接入 conflict 列表、冲突详情、只读重命名建议、bounded preview、用户答案记录、Markdown 规则记忆、SQLite 规则索引/命中、规则启用/禁用/编辑和确认后应用；不自动覆盖、不静默删除。
 - 冲突问答窗口：第一版已在收集箱侧栏提供可见入口和动作选择；后续仍需真正 diff 视图、批量冲突处理、强确认的重命名/覆盖执行流和更完整的恢复体验。
 - 批量整理：需要在 Archive Map、预算、冲突规则和批量恢复策略明确后增强。
-- 可见 audit 和 movement log：movement log 列表、单项/批量回滚预览、最近 audit timeline、audit 文本搜索和类型筛选已接入收集箱状态区域；更完整时间线详情、分页浏览和日期范围 UI 仍待增强。
+- 可见 audit 和 movement log：movement log 列表、单项/批量回滚预览、最近 audit timeline、audit 文本搜索、类型筛选、日期范围筛选、分页加载和详情展开已接入收集箱状态区域；长期审计分析、更细时间线视图和跨事件聚合仍待增强。
 - 回滚体验：基础回滚命令、movement log 单项回滚、批量回滚只读预览和确认入口已存在；冲突恢复体验、更细差异预览和批量确认策略仍待增强。
-- UI 清楚展示整理状态、失败原因和恢复动作：收集箱状态面板第一版已接入，集中展示 listener、queue、worker、resident worker、conflict、Archive Map 健康、movement log、audit timeline、最近事件和最近错误，并支持常驻 worker 手动启动/停止、整理计划确认原因展示、队列单项恢复、队列批量重试/跳过预览确认、movement log 单项回滚和批量回滚预览确认。
+- UI 清楚展示整理状态、失败原因和恢复动作：收集箱状态面板第一版已接入，集中展示 listener、queue、worker、resident worker、conflict、Archive Map 健康、movement log、audit timeline、最近事件和最近错误，并支持常驻 worker 手动启动/停止、整理计划确认原因展示、audit 日期范围/分页/详情、队列单项恢复、队列批量重试/跳过预览确认、movement log 单项回滚和批量回滚预览确认。
 - 将 `src/App.tsx` 中不相关的页面和占位数据逐步拆成组件与状态模块，减少主入口复杂度。
 
 ## v0.7：本地 RAG 与 NotebookLM 式问答
